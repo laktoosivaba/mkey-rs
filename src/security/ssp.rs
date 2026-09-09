@@ -484,3 +484,169 @@ impl SecureProtocolManager {
         self.decrypt_payload(&packet[1..])
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::security::random::FixedRandom;
+
+    const KN: [u8; 16] = [
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
+        0x0f,
+    ];
+    const RANDOM_B: [u8; 16] = [
+        0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7, 0xb8, 0xb9, 0xba, 0xbb, 0xbc, 0xbd, 0xbe,
+        0xbf,
+    ];
+
+    fn manager() -> SecureProtocolManager {
+        SecureProtocolManager::with_random(KN, Box::new(FixedRandom::single(RANDOM_B)))
+    }
+
+    #[test]
+    fn opcodes_round_trip_and_reject_unknown_values() {
+        for (byte, opcode) in [
+            (0x00, OpCode::Error),
+            (0x01, OpCode::OpenSessionStep1),
+            (0x02, OpCode::OpenSessionStep2),
+            (0x03, OpCode::SetKeyValue),
+            (0x04, OpCode::GetVersion),
+        ] {
+            assert_eq!(OpCode::try_from(byte).unwrap(), opcode);
+        }
+        assert!(matches!(OpCode::try_from(0x05), Err(Error::InvalidData(_))));
+    }
+
+    #[test]
+    fn a_packet_shorter_than_two_bytes_is_rejected() {
+        let mut ssp = manager();
+        assert!(matches!(
+            ssp.process_packet(&[]),
+            Err(Error::InvalidData(_))
+        ));
+        assert!(matches!(
+            ssp.process_packet(&[0x01]),
+            Err(Error::InvalidData(_))
+        ));
+    }
+
+    #[test]
+    fn step1_answers_with_an_encrypted_control_packet_and_advances_the_iv() {
+        let mut ssp = manager();
+        assert_eq!(ssp.state(), SspState::Ready);
+        assert_eq!(ssp.iv(), &[0u8; 16]);
+
+        let response = ssp.process_packet(&[0x01, 0x01]).unwrap();
+        assert_eq!(response[0], control::ENCRYPTED_CONTROL);
+        // [opcode ‖ randomB] = 17 bytes, + 2 CRC + padding = 32.
+        assert_eq!(response.len(), 33);
+        assert_eq!(ssp.state(), SspState::AuthStep1);
+        assert_eq!(ssp.random_b(), Some(&RANDOM_B));
+        assert_eq!(ssp.iv()[..], response[response.len() - 16..]);
+        assert!(ssp.session_key().is_none());
+    }
+
+    #[test]
+    fn step1_must_be_unencrypted_and_only_from_the_ready_state() {
+        let mut ssp = manager();
+        assert!(matches!(
+            ssp.process_packet(&[control::ENCRYPTED_CONTROL, 0x01]),
+            // Fails while decrypting: 1 byte is not a valid ciphertext.
+            Err(Error::InvalidData(_))
+        ));
+
+        let mut ssp = manager();
+        ssp.process_packet(&[0x01, 0x01]).unwrap();
+        assert!(matches!(
+            ssp.process_packet(&[0x01, 0x01]),
+            Err(Error::InvalidState { .. })
+        ));
+    }
+
+    #[test]
+    fn get_version_is_plaintext_and_changes_nothing() {
+        let mut ssp = manager();
+        let response = ssp.process_packet(&[0x01, 0x04]).unwrap();
+        assert_eq!(response, vec![control::UNENCRYPTED_CONTROL, 0x04, 1, 0]);
+        assert_eq!(ssp.state(), SspState::Ready);
+        assert_eq!(ssp.iv(), &[0u8; 16]);
+    }
+
+    #[test]
+    fn an_error_control_packet_is_reported_as_such() {
+        let mut ssp = manager();
+        match ssp.process_packet(&[0x01, 0x00]) {
+            Err(Error::InvalidData(message)) => {
+                assert!(message.contains("SSPError"), "{message}")
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn data_packets_require_an_established_session() {
+        let mut ssp = manager();
+        assert!(matches!(
+            ssp.process_packet(&[0x00, 0x02, 0x00]),
+            Err(Error::InvalidState { .. })
+        ));
+        assert!(matches!(
+            ssp.wrap_data(&[0x00]),
+            Err(Error::InvalidState { .. })
+        ));
+    }
+
+    #[test]
+    fn unwrap_data_rejects_a_plaintext_packet() {
+        let mut ssp = manager();
+        assert!(matches!(ssp.unwrap_data(&[]), Err(Error::InvalidData(_))));
+        assert!(matches!(
+            ssp.unwrap_data(&[control::UNENCRYPTED_CONTROL, 0x01]),
+            Err(Error::InvalidData(_))
+        ));
+    }
+
+    #[test]
+    fn ciphertext_length_must_be_a_positive_multiple_of_sixteen() {
+        let mut ssp = manager();
+        for len in [1usize, 15, 17, 31] {
+            let packet = [vec![control::ENCRYPTED_DATA], vec![0u8; len]].concat();
+            assert!(
+                matches!(ssp.process_packet(&packet), Err(Error::InvalidData(_))),
+                "ciphertext of {len} bytes should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn reset_clears_the_session_but_keeps_the_kn_key() {
+        let mut ssp = manager();
+        ssp.process_packet(&[0x01, 0x01]).unwrap();
+        ssp.reset();
+        assert_eq!(ssp.state(), SspState::Ready);
+        assert_eq!(ssp.iv(), &[0u8; 16]);
+        assert!(ssp.random_b().is_none());
+        assert!(ssp.random_a().is_none());
+        assert_eq!(ssp.kn_key(), &KN);
+    }
+
+    #[test]
+    fn request_builders_produce_plaintext_control_packets() {
+        assert_eq!(
+            SecureProtocolManager::build_open_session_step1_request(),
+            vec![0x01, 0x01]
+        );
+        assert_eq!(
+            SecureProtocolManager::build_get_version_request(),
+            vec![0x01, 0x04]
+        );
+    }
+
+    #[test]
+    fn default_ssp_version_is_one_zero() {
+        assert_eq!(SspVersion::default(), SspVersion { major: 1, minor: 0 });
+        assert_eq!(SspState::Ready.to_string(), "READY");
+        assert_eq!(SspState::AuthStep1.to_string(), "AUTH_STEP_1");
+        assert_eq!(SspState::InSession.to_string(), "IN_SESSION");
+    }
+}

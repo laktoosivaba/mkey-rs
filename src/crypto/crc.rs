@@ -73,3 +73,74 @@ pub fn crc16_hasher(data: &[u8]) -> [u8; 2] {
 
     [(result & 0xFF) as u8, ((result >> 8) & 0xFF) as u8]
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Reference values produced by an independent implementation of the
+    /// algorithm described in the doc comments above.
+    const SSP_VECTORS: &[(&str, &str)] = &[
+        ("", "6363"),
+        ("00", "fe51"),
+        ("0102", "6a24"),
+        ("0200", "102d"),
+        ("01b0b1b2b3b4b5b6b7b8b9babbbcbdbebf", "6d24"),
+        (
+            "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+            "b444",
+        ),
+        ("53414c544f", "45cf"),
+        ("ffffffffffffffffffffffffffffffff", "37cb"),
+    ];
+
+    const HASHER_VECTORS: &[(&str, &str)] = &[
+        ("", "0000"),
+        ("00", "78f0"),
+        ("0102", "8d35"),
+        ("0200", "f73c"),
+        ("01b0b1b2b3b4b5b6b7b8b9babbbcbdbebf", "04a9"),
+        (
+            "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+            "e453",
+        ),
+        ("53414c544f", "6400"),
+        ("ffffffffffffffffffffffffffffffff", "a92d"),
+        ("0011223344556677", "fc05"),
+        ("0000000000000000", "7383"),
+        ("ffffffffffffffff", "1604"),
+    ];
+
+    #[test]
+    fn crc16_ssp_matches_reference_vectors() {
+        for (input, expected) in SSP_VECTORS {
+            let data = hex::decode(input).unwrap();
+            assert_eq!(hex::encode(crc16_ssp(&data)), *expected, "input {input}");
+        }
+    }
+
+    #[test]
+    fn crc16_ssp_of_empty_input_is_the_seed_little_endian() {
+        assert_eq!(crc16_ssp(&[]), [0x63, 0x63]);
+    }
+
+    #[test]
+    fn crc16_hasher_matches_reference_vectors() {
+        for (input, expected) in HASHER_VECTORS {
+            let data = hex::decode(input).unwrap();
+            assert_eq!(hex::encode(crc16_hasher(&data)), *expected, "input {input}");
+        }
+    }
+
+    #[test]
+    fn crc16_hasher_of_empty_input_is_zero() {
+        // seed 0xFFFF finalised with `^ 0xFFFF`.
+        assert_eq!(crc16_hasher(&[]), [0x00, 0x00]);
+    }
+
+    #[test]
+    fn both_crcs_are_little_endian_and_two_bytes() {
+        assert_eq!(crc16_ssp(b"abc").len(), 2);
+        assert_eq!(crc16_hasher(b"abc").len(), 2);
+    }
+}

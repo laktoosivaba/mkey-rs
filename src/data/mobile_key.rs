@@ -291,3 +291,286 @@ pub fn encode_tlv(output: &mut Vec<u8>, tag_number: u8, value: &[u8]) {
     // Value
     output.extend_from_slice(value);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tlv(tag: u8, value: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        encode_tlv(&mut out, tag, value);
+        out
+    }
+
+    fn gp_container(tag_id: u8, permissions: u8, value: &[u8]) -> Vec<u8> {
+        let mut inner = vec![permissions];
+        encode_tlv(&mut inner, tag_id, value);
+        tlv(0x03, &inner)
+    }
+
+    const KN: [u8; 16] = [
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
+        0x0f,
+    ];
+
+    fn minimal_key_bytes() -> Vec<u8> {
+        [
+            tlv(0x00, &[0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77]),
+            tlv(0x01, &[0xAA; 40]),
+            tlv(0x02, &KN),
+        ]
+        .concat()
+    }
+
+    // -- TLV encoding ------------------------------------------------------
+
+    #[test]
+    fn tag_byte_is_private_class_primitive() {
+        assert_eq!(tlv(0x00, &[])[0], 0xC0);
+        assert_eq!(tlv(0x01, &[])[0], 0xC1);
+        assert_eq!(tlv(0x0B, &[])[0], 0xCB);
+        // Only the low five bits of the tag number are used.
+        assert_eq!(tlv(0x25, &[])[0], 0xC5);
+    }
+
+    #[test]
+    fn short_form_length_below_128() {
+        assert_eq!(tlv(0x00, &[]), vec![0xC0, 0x00]);
+        assert_eq!(tlv(0x00, &[0xFF]), vec![0xC0, 0x01, 0xFF]);
+        let encoded = tlv(0x00, &[0u8; 127]);
+        assert_eq!(&encoded[..2], &[0xC0, 0x7F]);
+        assert_eq!(encoded.len(), 2 + 127);
+    }
+
+    #[test]
+    fn long_form_one_length_byte_from_128_to_255() {
+        let encoded = tlv(0x01, &[0u8; 128]);
+        assert_eq!(&encoded[..3], &[0xC1, 0x81, 0x80]);
+        assert_eq!(encoded.len(), 3 + 128);
+
+        let encoded = tlv(0x01, &[0u8; 255]);
+        assert_eq!(&encoded[..3], &[0xC1, 0x81, 0xFF]);
+        assert_eq!(encoded.len(), 3 + 255);
+    }
+
+    #[test]
+    fn long_form_two_length_bytes_from_256() {
+        let encoded = tlv(0x01, &[0u8; 256]);
+        assert_eq!(&encoded[..4], &[0xC1, 0x82, 0x01, 0x00]);
+        assert_eq!(encoded.len(), 4 + 256);
+
+        let encoded = tlv(0x01, &[0u8; 65_535]);
+        assert_eq!(&encoded[..4], &[0xC1, 0x82, 0xFF, 0xFF]);
+        assert_eq!(encoded.len(), 4 + 65_535);
+    }
+
+    #[test]
+    fn long_form_three_length_bytes_from_65536() {
+        let encoded = tlv(0x01, &[0u8; 65_536]);
+        assert_eq!(&encoded[..5], &[0xC1, 0x83, 0x01, 0x00, 0x00]);
+        assert_eq!(encoded.len(), 5 + 65_536);
+    }
+
+    // -- MobileKey parsing -------------------------------------------------
+
+    #[test]
+    fn parses_the_three_mandatory_tags() {
+        let key = MobileKey::from_bytes(&minimal_key_bytes()).unwrap();
+        assert_eq!(
+            key.tag_0,
+            vec![0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77]
+        );
+        assert_eq!(key.tag_1, vec![0xAA; 40]);
+        assert_eq!(key.kn_key, KN);
+    }
+
+    #[test]
+    fn materialises_the_system_audit_tags_but_not_the_opening_mode_tag() {
+        let key = MobileKey::from_bytes(&minimal_key_bytes()).unwrap();
+        let audit = key.tags.get(&0x0B).expect("tag 0x0B is materialised");
+        assert_eq!(audit.permissions.flags(), 0x28); // WRITABLE | WRITE_WITHOUT_SECURITY
+        assert!(audit.value.is_empty());
+        assert_eq!(
+            key.tags.get(&0x0A).unwrap().permissions.flags(),
+            0x28,
+            "the deprecated audit tag is materialised too"
+        );
+        assert!(
+            !key.tags.contains_key(&0x10),
+            "the opening-mode tag is only inserted by higher layers"
+        );
+    }
+
+    #[test]
+    fn general_purpose_containers_carry_one_permission_byte() {
+        let bytes = [
+            minimal_key_bytes(),
+            gp_container(0x05, 0x0C, &[1, 2, 3, 4]),
+            gp_container(0x06, 0x14, &[9]),
+        ]
+        .concat();
+        let key = MobileKey::from_bytes(&bytes).unwrap();
+        assert_eq!(key.tags[&0x05].permissions.flags(), 0x0C);
+        assert_eq!(key.tags[&0x05].value, vec![1, 2, 3, 4]);
+        assert_eq!(key.tags[&0x06].permissions.flags(), 0x14);
+        assert_eq!(key.tags[&0x06].value, vec![9]);
+    }
+
+    #[test]
+    fn long_values_survive_a_parse_round_trip() {
+        for len in [127usize, 128, 255, 256, 300] {
+            let value: Vec<u8> = (0..len).map(|i| i as u8).collect();
+            let bytes = [
+                tlv(0x00, &[0x01; 8]),
+                tlv(0x01, &value),
+                tlv(0x02, &KN),
+                gp_container(0x05, 0x0C, &value),
+            ]
+            .concat();
+            let key = MobileKey::from_bytes(&bytes).unwrap();
+            assert_eq!(key.tag_1, value, "tag1 with {len} bytes");
+            assert_eq!(key.tags[&0x05].value, value, "tag 0x05 with {len} bytes");
+        }
+    }
+
+    #[test]
+    fn an_empty_container_is_skipped() {
+        let bytes = [minimal_key_bytes(), tlv(0x03, &[])].concat();
+        let key = MobileKey::from_bytes(&bytes).unwrap();
+        assert_eq!(key.tags.len(), 2, "only the two materialised system tags");
+    }
+
+    #[test]
+    fn top_level_system_tags_are_ignored() {
+        let bytes = [
+            minimal_key_bytes(),
+            tlv(0x0A, &[1]),
+            tlv(0x0B, &[2]),
+            tlv(0x10, &[3]),
+        ]
+        .concat();
+        let key = MobileKey::from_bytes(&bytes).unwrap();
+        assert!(key.tags[&0x0A].value.is_empty());
+        assert!(key.tags[&0x0B].value.is_empty());
+        assert!(!key.tags.contains_key(&0x10));
+    }
+
+    #[test]
+    fn missing_mandatory_tags_are_rejected() {
+        let cases = [
+            (
+                [tlv(0x01, &[0xAA; 4]), tlv(0x02, &KN)].concat(),
+                "missing tag 0",
+            ),
+            (
+                [tlv(0x00, &[0x01; 8]), tlv(0x02, &KN)].concat(),
+                "missing tag 1",
+            ),
+            (
+                [tlv(0x00, &[0x01; 8]), tlv(0x01, &[0xAA; 4])].concat(),
+                "missing kN key",
+            ),
+        ];
+        for (bytes, expected) in cases {
+            match MobileKey::from_bytes(&bytes) {
+                Err(Error::TlvError(message)) => assert_eq!(message, expected),
+                other => panic!("expected {expected}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_kn_key_that_is_not_sixteen_bytes_is_rejected() {
+        for len in [0usize, 8, 15, 17, 32] {
+            let bytes = [
+                tlv(0x00, &[0x01; 8]),
+                tlv(0x01, &[0xAA; 4]),
+                tlv(0x02, &vec![0u8; len]),
+            ]
+            .concat();
+            assert!(
+                matches!(MobileKey::from_bytes(&bytes), Err(Error::InvalidKeyLength(n)) if n == len),
+                "kN of {len} bytes should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn truncated_input_does_not_panic() {
+        let full = minimal_key_bytes();
+        for cut in 1..full.len() {
+            let _ = MobileKey::from_bytes(&full[..cut]);
+        }
+    }
+
+    // -- Accessors ---------------------------------------------------------
+
+    #[test]
+    fn legacy_tags_are_read_only_views_onto_the_fixed_fields() {
+        let key = MobileKey::from_bytes(&minimal_key_bytes()).unwrap();
+        for (id, expected) in [
+            (0x00u8, key.tag_0.clone()),
+            (0x01, key.tag_1.clone()),
+            (0x02, key.kn_key.to_vec()),
+        ] {
+            let tag = key.get_tag(id).unwrap();
+            assert_eq!(tag.data, expected);
+            assert_eq!(tag.permissions.flags(), Permissions::READABLE.flags());
+        }
+        assert!(key.get_tag(0x42).is_none());
+    }
+
+    #[test]
+    fn set_tag_data_keeps_existing_permissions_and_defaults_to_read_write() {
+        let bytes = [minimal_key_bytes(), gp_container(0x05, 0x14, &[1])].concat();
+        let mut key = MobileKey::from_bytes(&bytes).unwrap();
+
+        key.set_tag_data(0x05, vec![7, 7]);
+        assert_eq!(key.tags[&0x05].permissions.flags(), 0x14, "unchanged");
+        assert_eq!(key.tags[&0x05].value, vec![7, 7]);
+
+        key.set_tag_data(0x09, vec![9]);
+        assert_eq!(
+            key.tags[&0x09].permissions.flags(),
+            Permissions::READABLE.flags() | Permissions::WRITABLE.flags()
+        );
+    }
+
+    #[test]
+    fn to_bytes_round_trips_and_drops_the_system_tags() {
+        let bytes = [
+            minimal_key_bytes(),
+            gp_container(0x05, 0x0C, &[1, 2, 3, 4]),
+            gp_container(0x06, 0x14, &[9]),
+        ]
+        .concat();
+        let key = MobileKey::from_bytes(&bytes).unwrap();
+        let reparsed = MobileKey::from_bytes(&key.to_bytes()).unwrap();
+
+        assert_eq!(reparsed.tag_0, key.tag_0);
+        assert_eq!(reparsed.tag_1, key.tag_1);
+        assert_eq!(reparsed.kn_key, key.kn_key);
+        for id in [0x05u8, 0x06] {
+            assert_eq!(reparsed.tags[&id].value, key.tags[&id].value);
+            assert_eq!(reparsed.tags[&id].permissions, key.tags[&id].permissions);
+        }
+        // 0x0A / 0x0B are re-materialised rather than serialised.
+        assert!(!key.to_hex().contains("ca00"));
+    }
+
+    #[test]
+    fn permissions_flags_match_the_documented_bit_values() {
+        assert_eq!(Permissions::WRITE_WITHOUT_SECURITY.flags(), 0x20);
+        assert_eq!(Permissions::READ_WITHOUT_SECURITY.flags(), 0x10);
+        assert_eq!(Permissions::WRITABLE.flags(), 0x08);
+        assert_eq!(Permissions::READABLE.flags(), 0x04);
+        assert_eq!(Permissions::REMOVE_IF_ABSENT.flags(), 0x02);
+        assert_eq!(Permissions::OVERWRITE_IF_PRESENT.flags(), 0x01);
+
+        // `contains` tests for *any* overlapping bit, not a subset.
+        let perms = Permissions::new(0x0C);
+        assert!(perms.is_readable() && perms.is_writable());
+        assert!(!perms.read_without_security());
+        assert!(!perms.write_without_security());
+    }
+}

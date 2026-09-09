@@ -391,3 +391,130 @@ impl JustinProtocolManager<NoopKeyStore> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `base62(keyId ‖ crc16Hasher(keyId))`, cross-checked against an
+    /// independent implementation.
+    #[test]
+    fn key_identifiers_match_reference_values() {
+        for (key_id, expected) in [
+            ("0011223344556677", "64zDKgN3bBMp"),
+            ("0000000000000000", "7GX"),
+            ("ffffffffffffffff", "62IeP5BU9vzmio"),
+            ("3132333435363738", "1a0AFzKIBiaui4"),
+        ] {
+            let bytes = hex::decode(key_id).unwrap();
+            assert_eq!(compute_key_identifier(&bytes), expected, "key id {key_id}");
+        }
+    }
+
+    #[test]
+    fn command_opcodes_reject_unknown_values() {
+        assert_eq!(CommandOpCode::try_from(0x00).unwrap(), CommandOpCode::Open);
+        assert_eq!(
+            CommandOpCode::try_from(0x03).unwrap(),
+            CommandOpCode::WriteTag
+        );
+        assert!(matches!(
+            CommandOpCode::try_from(0x04),
+            Err(Error::InvalidData(_))
+        ));
+    }
+
+    #[test]
+    fn only_tags_0x00_to_0x02_are_legacy() {
+        for id in 0x00u8..=0x02 {
+            assert!(is_legacy_tag(id));
+        }
+        for id in [0x03u8, 0x05, 0x0A, 0x0B, 0x10, 0xFF] {
+            assert!(!is_legacy_tag(id));
+        }
+    }
+
+    #[test]
+    fn op_result_names_and_groups() {
+        assert_eq!(decode_op_result(2), "ACCESS_GRANTED");
+        assert_eq!(decode_op_result(3), "ACCESS_REJECTED");
+        assert_eq!(decode_op_result(6), "DOOR_IN_OFFICE");
+        assert_eq!(decode_op_result(99), "UNKNOWN");
+        assert_eq!(decode_op_result_group(2), "ACCEPTED");
+        assert_eq!(decode_op_result_group(6), "ACCEPTED");
+        assert_eq!(decode_op_result_group(3), "REJECTED");
+        assert_eq!(decode_op_result_group(1), "FAILURE");
+        assert_eq!(decode_op_result_group(0), "UNKNOWN");
+    }
+
+    #[test]
+    fn an_empty_command_is_an_error_but_a_bad_state_is_only_a_status_byte() {
+        let mut justin = JustinProtocolManager::new(NoopKeyStore);
+        assert!(matches!(
+            justin.process_command(&[]),
+            Err(Error::InvalidData(_))
+        ));
+        // Not connected: CLOSE / READ_TAG / WRITE_TAG answer GenericError
+        // instead of failing the packet.
+        assert_eq!(justin.process_command(&[0x01]).unwrap(), vec![0x01]);
+        assert_eq!(justin.process_command(&[0x02, 0x00]).unwrap(), vec![0x01]);
+        assert_eq!(
+            justin.process_command(&[0x03, 0x05, 0x01]).unwrap(),
+            vec![0x01]
+        );
+    }
+
+    #[test]
+    fn open_reports_not_found_when_the_store_has_no_key() {
+        let mut justin = JustinProtocolManager::new(NoopKeyStore);
+        assert_eq!(
+            justin
+                .process_command(&[0x00, 1, 2, 3, 4, 5, 6, 7, 8])
+                .unwrap(),
+            vec![0x02]
+        );
+        assert_eq!(justin.state(), JustinState::Ready);
+        // Too short for a key id.
+        assert_eq!(justin.process_command(&[0x00, 1, 2]).unwrap(), vec![0x01]);
+    }
+
+    #[test]
+    fn close_moves_back_to_ready_exactly_once() {
+        let key = MobileKey::new([0u8; 16]);
+        let mut justin = JustinProtocolManager::new_with_key(key);
+        assert_eq!(justin.state(), JustinState::Connected);
+        assert_eq!(justin.process_command(&[0x01]).unwrap(), vec![0x00]);
+        assert_eq!(justin.state(), JustinState::Ready);
+        assert_eq!(justin.process_command(&[0x01]).unwrap(), vec![0x01]);
+    }
+
+    #[test]
+    fn writing_the_audit_tag_latches_the_op_result() {
+        let key = MobileKey::new([0u8; 16]);
+        let mut justin = JustinProtocolManager::new_with_key(key);
+        justin
+            .current_key_mut()
+            .unwrap()
+            .set_tag_data(TAG_AUDIT, vec![]);
+        assert!(justin.last_audit_op_result().is_none());
+        assert_eq!(
+            justin.process_command(&[0x03, TAG_AUDIT, 2, 0xAA]).unwrap(),
+            vec![0x00]
+        );
+        assert_eq!(justin.last_audit_op_result(), Some(2));
+    }
+
+    #[test]
+    fn legacy_tags_are_never_writable() {
+        let key = MobileKey::new([0u8; 16]);
+        let mut justin = JustinProtocolManager::new_with_key(key);
+        justin.set_secure_session(true);
+        for id in 0x00u8..=0x02 {
+            assert_eq!(
+                justin.process_command(&[0x03, id, 0x01]).unwrap(),
+                vec![0x01],
+                "tag 0x{id:02X}"
+            );
+        }
+    }
+}

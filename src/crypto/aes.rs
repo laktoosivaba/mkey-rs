@@ -57,3 +57,70 @@ pub fn decrypt_aes_cbc(
         .map_err(|_| crate::Error::DecryptionFailed)?;
     Ok(plaintext.to_vec())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// FIPS-197 Appendix C.1 (AES-128). With an all-zero IV a single-block CBC
+    /// encryption is identical to ECB, so this is an external reference value.
+    const FIPS_KEY: [u8; 16] = [
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
+        0x0f,
+    ];
+    const FIPS_PLAINTEXT: [u8; 16] = [
+        0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee,
+        0xff,
+    ];
+    const FIPS_CIPHERTEXT: &str = "69c4e0d86a7b0430d8cdb78070b4c55a";
+
+    #[test]
+    fn matches_the_fips197_vector_with_a_zero_iv() {
+        let ciphertext = encrypt_aes_cbc(&FIPS_KEY, &[0u8; 16], &FIPS_PLAINTEXT);
+        assert_eq!(hex::encode(&ciphertext), FIPS_CIPHERTEXT);
+    }
+
+    #[test]
+    fn decrypt_inverts_encrypt() {
+        let key = [0x2bu8; 16];
+        let iv = [0x99u8; 16];
+        let plaintext: Vec<u8> = (0..48u8).collect();
+        let ciphertext = encrypt_aes_cbc(&key, &iv, &plaintext);
+        assert_eq!(ciphertext.len(), plaintext.len());
+        assert_eq!(decrypt_aes_cbc(&key, &iv, &ciphertext).unwrap(), plaintext);
+    }
+
+    #[test]
+    fn the_iv_chains_across_blocks() {
+        // Encrypting two blocks at once equals encrypting the second block with
+        // the first block's ciphertext as IV — the property the SSP IV chain
+        // relies on.
+        let key = [0x5eu8; 16];
+        let iv = [0u8; 16];
+        let block_a = [0x01u8; 16];
+        let block_b = [0x02u8; 16];
+        let together = encrypt_aes_cbc(&key, &iv, &[block_a, block_b].concat());
+
+        let first = encrypt_aes_cbc(&key, &iv, &block_a);
+        let mut chained_iv = [0u8; 16];
+        chained_iv.copy_from_slice(&first);
+        let second = encrypt_aes_cbc(&key, &chained_iv, &block_b);
+
+        assert_eq!(together, [first, second].concat());
+    }
+
+    #[test]
+    fn the_v0100_signing_iv_is_sixteen_ff_bytes() {
+        let nonce = [0x42u8; 16];
+        let signed = encrypt_aes_cbc(&FIPS_KEY, &[0xFFu8; 16], &nonce);
+        assert_eq!(signed.len(), 16);
+        // XOR-then-encrypt: the same result as encrypting `nonce ^ FF..` with a zero IV.
+        let xored: Vec<u8> = nonce.iter().map(|b| b ^ 0xFF).collect();
+        assert_eq!(signed, encrypt_aes_cbc(&FIPS_KEY, &[0u8; 16], &xored));
+    }
+
+    #[test]
+    fn a_short_ciphertext_is_rejected() {
+        assert!(decrypt_aes_cbc(&FIPS_KEY, &[0u8; 16], &[0u8; 5]).is_err());
+    }
+}
