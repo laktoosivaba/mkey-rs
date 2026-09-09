@@ -91,7 +91,7 @@ impl SaltoLock {
     /// # Arguments
     /// * `timeout` - Maximum time to wait for a lock.
     /// * `filter` - Optional filter function. If provided, only locks for which
-    ///              the filter returns `true` will be connected to.
+    ///   the filter returns `true` will be connected to.
     pub async fn scan_and_connect_filtered(
         &mut self,
         timeout: Option<Duration>,
