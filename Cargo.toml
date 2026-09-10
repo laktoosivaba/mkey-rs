@@ -8,7 +8,7 @@ license = "MPL-2.0"
 [features]
 default = []
 sdk = []
-sdk-virgil = ["sdk", "dep:wasmtime", "dep:rsa", "dep:pkcs8", "dep:base64"]
+sdk-virgil = ["sdk", "dep:wasmtime", "dep:rsa", "dep:pkcs8", "dep:base64", "dep:rand"]
 
 [dependencies]
 btleplug = "0.11"
@@ -31,6 +31,7 @@ wasmtime = { version = "29", optional = true }
 rsa = { version = "0.9", optional = true }
 pkcs8 = { version = "0.10", optional = true }
 base64 = { version = "0.22", optional = true }
+rand = { version = "0.8", optional = true }
 
 [[example]]
 name = "mkey_open"
