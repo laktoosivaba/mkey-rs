@@ -41,6 +41,14 @@ required-features = ["sdk"]
 name = "mkey_decode"
 required-features = ["sdk-virgil"]
 
+[[example]]
+name = "keystore_gen"
+required-features = ["sdk-virgil"]
+
+[[example]]
+name = "keystore_check"
+required-features = ["sdk-virgil"]
+
 [dev-dependencies]
 dotenvy = "0.15"
 base64 = "0.22"
