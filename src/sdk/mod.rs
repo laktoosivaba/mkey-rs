@@ -1,6 +1,13 @@
 #[cfg(feature = "sdk-virgil")]
 mod virgil;
 
+#[cfg(feature = "sdk-virgil")]
+pub use virgil::{
+    decrypt_virgil_private_key, derive_virgil_public_key, encrypt_virgil_private_key,
+    generate_rsa_private_key, generate_virgil_key_pair, roundtrip_virgil_public_key, VirgilKeyPair,
+    RSA_KEY_BITS,
+};
+
 use std::time::Duration;
 
 use crate::data::mobile_key::MobileKey;

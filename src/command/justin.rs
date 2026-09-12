@@ -365,7 +365,7 @@ fn decode_op_result_group(op_result: u8) -> &'static str {
 fn is_legacy_tag(tag_id: u8) -> bool {
     // Matches Java SDK's `MobileKeyTransformer`: only tags 0x00..0x02 are treated as legacy.
     // These are returned without permission checks and are never writable.
-    matches!(tag_id, 0x00 | 0x01 | 0x02)
+    matches!(tag_id, 0x00..=0x02)
 }
 
 impl JustinProtocolManager<NoopKeyStore> {

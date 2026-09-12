@@ -26,7 +26,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mobile_key = mkey::sdk::decode(&rsa_key_der, &encrypted_virgil_key, &encrypted_mkey_data)?;
 
     println!("\n=== Decrypted SALTO Mobile Key ===");
-    println!("  kn_key: {}", hex::encode(&mobile_key.kn_key));
+    println!("  kn_key: {}", hex::encode(mobile_key.kn_key));
     println!("  tag_0: {}", hex::encode(&mobile_key.tag_0));
     println!("  tag_1: {} bytes", mobile_key.tag_1.len());
     println!("  tags: {:?}", mobile_key.tags.keys().collect::<Vec<_>>());
