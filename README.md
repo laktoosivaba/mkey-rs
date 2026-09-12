@@ -43,7 +43,9 @@ crates/mkey-wasm/build.sh nodejs out # or anywhere else
 cargo, `wasm-bindgen` and `wasm-opt` are spelled out in that script rather
 than left to `wasm-pack`, which applies its optimiser settings only to its own
 `release` profile. `wasm-bindgen` is pinned to the version of the CLI, because
-it refuses a mismatch.
+it refuses a mismatch. Nothing else is needed: `mkey-core` turns on
+`getrandom`'s `wasm_js` feature for wasm32 itself, so a plain `cargo build
+--target wasm32-unknown-unknown` works in a fresh clone.
 
 Measured on 2026-09-12, `wasm-release` profile plus `wasm-opt -Oz`:
 

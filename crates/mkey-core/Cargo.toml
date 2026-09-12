@@ -16,7 +16,8 @@ iso7816-tlv.workspace = true
 once_cell.workspace = true
 thiserror.workspace = true
 
-# Two halves are needed to give `getrandom` a browser backend: this feature,
-# and the `--cfg getrandom_backend="wasm_js"` rustflag in `.cargo/config.toml`.
+# `getrandom` has no backend for wasm32-unknown-unknown unless it is told to
+# use the Web Crypto one. Its compile_error still says a rustflag is needed
+# too; as of 0.3.4 the feature alone is what the backend is gated on.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { workspace = true, features = ["wasm_js"] }
