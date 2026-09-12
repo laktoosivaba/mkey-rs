@@ -22,7 +22,8 @@ mod wire;
 use mkey_core::security::random::FixedRandom;
 use mkey_core::MobileKey;
 use mkey_session::{Detection, Event, Mode, Options, Timeouts};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use serde_wasm_bindgen::Serializer;
 use wasm_bindgen::prelude::*;
 
 use crate::wire::{parse_timer_id, WireAction};
@@ -166,7 +167,12 @@ impl Session {
     fn poll(&mut self, event: Event<'_>) -> Result<JsValue, JsValue> {
         let actions: Vec<WireAction> = self.inner.poll(event).into_iter().map(Into::into).collect();
 
-        Ok(serde_wasm_bindgen::to_value(&actions)?)
+        // `null`, not `undefined`: "the lock reported no result" is a value
+        // the caller compares against, and `undefined` would make every such
+        // field indistinguishable from a typo in the field name.
+        let serializer = Serializer::new().serialize_missing_as_null(true);
+
+        Ok(actions.serialize(&serializer)?)
     }
 }
 

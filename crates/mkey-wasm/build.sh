@@ -19,7 +19,6 @@ wasm-bindgen \
   --target "$target" \
   --out-dir "$out" \
   --out-name mkey_wasm \
-  --no-typescript \
   "$root/target/wasm32-unknown-unknown/wasm-release/mkey_wasm.wasm"
 
 wasm-opt -Oz \
