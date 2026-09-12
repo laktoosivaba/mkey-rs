@@ -159,7 +159,7 @@ impl<S: MobileKeyStore> JustinProtocolManager<S> {
         }
 
         let key_id = &payload[0..8];
-        let identifier = self.compute_key_identifier(key_id);
+        let identifier = compute_key_identifier(key_id);
 
         match self.key_store.get_key(&identifier) {
             Some(key) => {
@@ -281,17 +281,6 @@ impl<S: MobileKeyStore> JustinProtocolManager<S> {
         Ok(vec![CommandStatus::Success.into()])
     }
 
-    fn compute_key_identifier(&self, key_id: &[u8]) -> String {
-        let hash = crc16_hasher(key_id);
-
-        let mut base62_input = [0u8; 10];
-        base62_input[0..8].copy_from_slice(&key_id[0..8]);
-        base62_input[8] = hash[0];
-        base62_input[9] = hash[hash.len() - 1];
-
-        encode_base62(&base62_input)
-    }
-
     fn can_read_tag(&self, tag_id: u8, permissions: Permissions) -> bool {
         if is_legacy_tag(tag_id) {
             return true;
@@ -330,7 +319,26 @@ impl<S: MobileKeyStore> JustinProtocolManager<S> {
     }
 }
 
-const TAG_AUDIT: u8 = 0x0B;
+/// Audit tag id. The lock writes the operation result here.
+pub const TAG_AUDIT: u8 = 0x0B;
+
+/// Derive the key-store lookup identifier for an 8-byte key id.
+///
+/// `base62(keyId ‖ crc16Hasher(keyId))`, matching the OPEN command in the
+/// Java SDK.
+///
+/// # Panics
+/// Panics if `key_id` is shorter than 8 bytes.
+pub fn compute_key_identifier(key_id: &[u8]) -> String {
+    let hash = crc16_hasher(key_id);
+
+    let mut base62_input = [0u8; 10];
+    base62_input[0..8].copy_from_slice(&key_id[0..8]);
+    base62_input[8] = hash[0];
+    base62_input[9] = hash[hash.len() - 1];
+
+    encode_base62(&base62_input)
+}
 
 /// Decode OpResult from the lock
 fn decode_op_result(op_result: u8) -> &'static str {

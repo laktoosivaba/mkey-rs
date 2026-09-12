@@ -258,8 +258,11 @@ impl MobileKey {
     }
 }
 
-/// Encode a single TLV with private class tag
-fn encode_tlv(output: &mut Vec<u8>, tag_number: u8, value: &[u8]) {
+/// Encode a single BER-TLV with a private-class primitive tag.
+///
+/// Tag byte is `0xC0 | (tag_number & 0x1F)`; the length uses the short form
+/// below 128 and the `0x81`/`0x82`/`0x83` long forms above it.
+pub fn encode_tlv(output: &mut Vec<u8>, tag_number: u8, value: &[u8]) {
     // Tag byte: Private class (0xC0) | tag number
     output.push(0xC0 | (tag_number & 0x1F));
 

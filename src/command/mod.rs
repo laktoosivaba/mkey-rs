@@ -1,5 +1,6 @@
 pub mod justin;
 
 pub use justin::{
-    CommandOpCode, CommandStatus, JustinProtocolManager, JustinState, MobileKeyStore,
+    compute_key_identifier, CommandOpCode, CommandStatus, JustinProtocolManager, JustinState,
+    MobileKeyStore, TAG_AUDIT,
 };

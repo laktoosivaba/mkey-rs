@@ -29,6 +29,11 @@ impl<S: MobileKeyStore> JustinStack0100<S> {
         self.justin.state()
     }
 
+    /// The SSP layer (state, session key, IV chain).
+    pub fn ssp(&self) -> &SecureProtocolManager {
+        &self.ssp
+    }
+
     pub fn justin(&self) -> &JustinProtocolManager<S> {
         &self.justin
     }
