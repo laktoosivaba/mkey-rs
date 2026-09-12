@@ -1070,7 +1070,6 @@ dependencies = [
 name = "mkey"
 version = "0.1.0"
 dependencies = [
- "base62",
  "base64 0.22.1",
  "dotenvy",
  "hex",
@@ -1078,9 +1077,6 @@ dependencies = [
  "mkey-core",
  "mkey-sdk-virgil",
  "mkey-session",
- "mkey-sim",
- "serde",
- "serde_json",
  "tokio",
 ]
 
@@ -1132,15 +1128,6 @@ version = "0.1.0"
 dependencies = [
  "hex",
  "mkey-core",
-]
-
-[[package]]
-name = "mkey-sim"
-version = "0.1.0"
-dependencies = [
- "mkey-ble",
- "mkey-core",
- "mkey-session",
 ]
 
 [[package]]

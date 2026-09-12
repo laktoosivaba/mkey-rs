@@ -13,6 +13,28 @@ out=${2:-pkg}
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../.." && pwd)
 
+# Panic messages carry the source path of whatever panicked, and those paths
+# are data, not debug info — `strip` does not touch them. Unremapped they put
+# the build machine's home directory, and the name of whatever crate registry
+# it uses, inside an artifact that is committed and shipped.
+cargo_home=${CARGO_HOME:-$HOME/.cargo}
+rustup_home=${RUSTUP_HOME:-$HOME/.rustup}
+
+# The registry source directories are named after the registry itself, which
+# is below $CARGO_HOME and so not covered by remapping that — and the name of
+# a private mirror has no business in a published artifact. Each one is
+# mapped to the same generic path. No prefix here overlaps another: mapping
+# $CARGO_HOME as a whole as well would be ambiguous, and every cargo path that
+# reaches a panic message comes from a registry checkout anyway.
+remap=""
+for registry in "$cargo_home"/registry/src/*/; do
+  [ -d "$registry" ] && remap="$remap --remap-path-prefix=$registry=/cargo/registry/"
+done
+
+# shellcheck disable=SC2086 -- $remap is a list of flags, word splitting is wanted
+RUSTFLAGS="${RUSTFLAGS:-} $remap \
+  --remap-path-prefix=$rustup_home=/rustup \
+  --remap-path-prefix=$root=/build" \
 cargo build -p mkey-wasm --target wasm32-unknown-unknown --profile wasm-release
 
 wasm-bindgen \
