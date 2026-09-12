@@ -13,7 +13,6 @@ cbc.workspace = true
 getrandom.workspace = true
 hex.workspace = true
 iso7816-tlv.workspace = true
-num-bigint.workspace = true
 once_cell.workspace = true
 thiserror.workspace = true
 

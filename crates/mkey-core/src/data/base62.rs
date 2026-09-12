@@ -4,34 +4,44 @@ const BASE62_CHARS: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMN
 ///
 /// Used in OPEN command to encode [8-byte key ID + 2-byte CRC] for key lookup.
 /// The SDK uses character set: 0-9A-Za-z (standard Base62)
+///
+/// The input is one big-endian integer of arbitrary width, so the conversion
+/// is long division: divide the whole buffer by 62, keep the remainder as a
+/// digit, repeat until nothing is left. A bignum library would do the same
+/// thing, and this way the protocol carries no arbitrary-precision arithmetic
+/// into a browser for the sake of ten bytes.
 pub fn encode_base62(data: &[u8]) -> String {
     if data.is_empty() {
         return String::new();
     }
 
-    let mut num = num_bigint::BigUint::from(0u8);
-    for &byte in data {
-        num = (num << 8) | num_bigint::BigUint::from(byte);
-    }
-
-    if num == num_bigint::BigUint::from(0u8) {
+    if data.iter().all(|&byte| byte == 0) {
         return "0".repeat(data.len() + 1);
     }
 
-    let mut result = Vec::new();
-    let base = num_bigint::BigUint::from(62u8);
-    let mut n = num;
+    let mut value = data.to_vec();
+    // Everything before this is known to be zero and can be skipped.
+    let mut start = 0;
+    let mut digits = Vec::new();
 
-    while n > num_bigint::BigUint::from(0u8) {
-        let remainder = &n % &base;
-        let idx = remainder.to_u64_digits();
-        let digit = if idx.is_empty() { 0 } else { idx[0] as usize };
-        result.push(BASE62_CHARS[digit]);
-        n /= &base;
+    while start < value.len() {
+        let mut remainder = 0u16;
+
+        for byte in &mut value[start..] {
+            let accumulator = (remainder << 8) | u16::from(*byte);
+            *byte = (accumulator / 62) as u8;
+            remainder = accumulator % 62;
+        }
+
+        digits.push(BASE62_CHARS[remainder as usize]);
+
+        while start < value.len() && value[start] == 0 {
+            start += 1;
+        }
     }
 
-    result.reverse();
-    String::from_utf8(result).unwrap()
+    digits.reverse();
+    String::from_utf8(digits).expect("the alphabet is ASCII")
 }
 
 #[cfg(test)]

@@ -106,3 +106,6 @@ flake.lock
 # Before adding new lines, see the comment at the top.
 .env
 /keystore
+
+## wasm build output
+crates/mkey-wasm/pkg*/

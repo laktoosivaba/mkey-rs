@@ -66,6 +66,16 @@ hex.workspace = true
 # timeout fires instantly instead of being waited out.
 tokio = { workspace = true, features = ["full", "test-util"] }
 
+# Size is what decides whether the browser gets the Rust protocol at all, so
+# the wasm build gets its own profile rather than bending the native one.
+[profile.wasm-release]
+inherits = "release"
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
 [[example]]
 name = "mkey_open"
 required-features = ["sdk", "ble"]

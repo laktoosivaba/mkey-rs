@@ -21,6 +21,7 @@ below.
 | `mkey-core` | the protocol: crypto, mobile key codec, SSP, Justin. No I/O, no async, no clock. | any, `wasm32-unknown-unknown` included |
 | `mkey-session` | one opening attempt as a pure state machine: events in, actions out | any, wasm32 included |
 | `mkey-ble` | the I/O shell: the `BleTransport` trait, its btleplug implementation (feature `btleplug`), and the pump that carries the session's actions out to a radio | native; without the radio, wasm32 too |
+| `mkey-wasm` | the session compiled for the browser: events in, actions out, as plain objects | `wasm32-unknown-unknown` |
 | `mkey-sdk-virgil` | provisioning: opening a Virgil container, generating the keystore | native |
 
 The split is what lets the protocol be compiled for the browser without a
@@ -31,6 +32,31 @@ honest:
 cargo check -p mkey-core -p mkey-session -p mkey-ble \
   --no-default-features --target wasm32-unknown-unknown
 ```
+
+### Building the wasm module
+
+```bash
+crates/mkey-wasm/build.sh            # --target web, into crates/mkey-wasm/pkg
+crates/mkey-wasm/build.sh nodejs out # or anywhere else
+```
+
+cargo, `wasm-bindgen` and `wasm-opt` are spelled out in that script rather
+than left to `wasm-pack`, which applies its optimiser settings only to its own
+`release` profile. `wasm-bindgen` is pinned to the version of the CLI, because
+it refuses a mismatch.
+
+Measured on 2026-09-12, `wasm-release` profile plus `wasm-opt -Oz`:
+
+| | bytes |
+|---|---|
+| raw | 133 756 |
+| gzip | 58 495 |
+| brotli | 49 701 |
+| JS glue, gzip | 4 822 |
+
+Loading and instantiating it takes well under a millisecond on a desktop, and
+a whole opening attempt — handshake, exchange, verdict — runs in 35 µs once
+warm, so the size is the only number that matters.
 
 ### Where the decisions live
 
