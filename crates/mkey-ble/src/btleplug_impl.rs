@@ -1,15 +1,16 @@
-use crate::transport::advertisement::{parse_salto_advertisement, parse_salto_by_service_uuid};
-use crate::transport::traits::{
-    BleTransport, ConnectedLock, DiscoveredLock, LockFilter, Notification, SALTO_MANUFACTURER_ID,
-    SALTO_NOTIFY_UUID, SALTO_SERVICE_UUID, SALTO_WRITE_UUID,
+use crate::advertisement::{discover_by_manufacturer_data, discover_by_service_uuid};
+use crate::gatt::GattContext;
+use crate::traits::{
+    BleTransport, ConnectedLock, DiscoveredLock, LockFilter, Notification, SALTO_NOTIFY_UUID,
+    SALTO_SERVICE_UUID, SALTO_WRITE_UUID,
 };
-use crate::Error;
 use btleplug::api::{
     Central, CentralEvent, CharPropFlags, Characteristic, Manager as _, Peripheral as _,
     ScanFilter, WriteType,
 };
 use btleplug::platform::{Adapter, Manager, Peripheral};
 use futures::stream::StreamExt;
+use mkey_core::{Error, SALTO_MANUFACTURER_ID};
 use std::pin::Pin;
 use std::time::Duration;
 
@@ -26,12 +27,15 @@ pub struct BtleplugTransport {
 
 impl BtleplugTransport {
     pub async fn new() -> Result<Self, Error> {
-        let manager = Manager::new().await?;
-        let adapters = manager.adapters().await?;
+        let manager = Manager::new().await.gatt("Opening the Bluetooth manager")?;
+        let adapters = manager
+            .adapters()
+            .await
+            .gatt("Listing Bluetooth adapters")?;
         let adapter = adapters
             .into_iter()
             .next()
-            .ok_or_else(|| Error::ConnectionFailed("No Bluetooth adapter found".to_string()))?;
+            .ok_or(Error::BluetoothUnavailable)?;
 
         Ok(Self {
             adapter,
@@ -67,10 +71,13 @@ impl BtleplugTransport {
         info: DiscoveredLock,
     ) -> Result<ConnectedLock, Error> {
         eprintln!("[DEBUG] connect_to_peripheral: connecting...");
-        peripheral.connect().await?;
+        peripheral.connect().await.gatt("Connecting")?;
 
         eprintln!("[DEBUG] connect_to_peripheral: discovering services...");
-        peripheral.discover_services().await?;
+        peripheral
+            .discover_services()
+            .await
+            .gatt("Discovering services")?;
 
         // Validate SALTO service exists
         let has_salto_service = peripheral
@@ -80,7 +87,7 @@ impl BtleplugTransport {
 
         if !has_salto_service {
             eprintln!("[DEBUG] connect_to_peripheral: SALTO service NOT found");
-            peripheral.disconnect().await?;
+            peripheral.disconnect().await.gatt("Disconnecting")?;
             return Err(Error::ServiceNotFound(SALTO_SERVICE_UUID.to_string()));
         }
         eprintln!("[DEBUG] connect_to_peripheral: SALTO service found");
@@ -114,18 +121,25 @@ impl BtleplugTransport {
         let name = props.local_name.clone();
         let rssi = props.rssi;
 
-        parse_salto_advertisement(id.clone(), name.clone(), rssi, &props.manufacturer_data)
-            .or_else(|| parse_salto_by_service_uuid(id, name, rssi, &props.services))
+        discover_by_manufacturer_data(id.clone(), name.clone(), rssi, &props.manufacturer_data)
+            .or_else(|| discover_by_service_uuid(id, name, rssi, &props.services))
     }
 }
 
 impl BleTransport for BtleplugTransport {
     async fn scan(&self, duration: Duration) -> Result<Vec<DiscoveredLock>, Error> {
-        self.adapter.start_scan(ScanFilter::default()).await?;
+        self.adapter
+            .start_scan(ScanFilter::default())
+            .await
+            .gatt("Starting a scan")?;
         tokio::time::sleep(duration).await;
-        self.adapter.stop_scan().await?;
+        self.adapter.stop_scan().await.gatt("Stopping the scan")?;
 
-        let peripherals = self.adapter.peripherals().await?;
+        let peripherals = self
+            .adapter
+            .peripherals()
+            .await
+            .gatt("Listing peripherals")?;
         let mut locks = Vec::new();
 
         for peripheral in peripherals {
@@ -145,8 +159,11 @@ impl BleTransport for BtleplugTransport {
         filter: Option<LockFilter>,
     ) -> Result<ConnectedLock, Error> {
         eprintln!("[DEBUG] scan_and_connect: starting scan...");
-        let mut events = self.adapter.events().await?;
-        self.adapter.start_scan(ScanFilter::default()).await?;
+        let mut events = self.adapter.events().await.gatt("Watching for devices")?;
+        self.adapter
+            .start_scan(ScanFilter::default())
+            .await
+            .gatt("Starting a scan")?;
 
         let result = tokio::time::timeout(timeout, async {
             while let Some(event) = events.next().await {
@@ -205,8 +222,11 @@ impl BleTransport for BtleplugTransport {
         timeout: Duration,
     ) -> Result<ConnectedLock, Error> {
         eprintln!("[DEBUG] connect_by_id: looking for {}", lock_id);
-        let mut events = self.adapter.events().await?;
-        self.adapter.start_scan(ScanFilter::default()).await?;
+        let mut events = self.adapter.events().await.gatt("Watching for devices")?;
+        self.adapter
+            .start_scan(ScanFilter::default())
+            .await
+            .gatt("Starting a scan")?;
 
         let result = tokio::time::timeout(timeout, async {
             while let Some(event) = events.next().await {
@@ -242,8 +262,8 @@ impl BleTransport for BtleplugTransport {
 
     async fn disconnect(&mut self) -> Result<(), Error> {
         if let Some(peripheral) = self.peripheral.take() {
-            if peripheral.is_connected().await? {
-                peripheral.disconnect().await?;
+            if peripheral.is_connected().await.gatt("Checking the link")? {
+                peripheral.disconnect().await.gatt("Disconnecting")?;
             }
         }
         self.write_characteristic = None;
@@ -270,7 +290,10 @@ impl BleTransport for BtleplugTransport {
             WriteType::WithoutResponse
         };
         eprintln!("[DEBUG] BLE write type: {:?}", write_type);
-        peripheral.write(characteristic, data, write_type).await?;
+        peripheral
+            .write(characteristic, data, write_type)
+            .await
+            .gatt("Writing")?;
         eprintln!("[DEBUG] BLE write complete");
         Ok(())
     }
@@ -312,8 +335,14 @@ impl BleTransport for BtleplugTransport {
             .ok_or(Error::Disconnected)?;
 
         // Create the stream first so we don't miss the first notification after CCCD is enabled.
-        let stream = peripheral.notifications().await?;
-        peripheral.subscribe(notify_char).await?;
+        let stream = peripheral
+            .notifications()
+            .await
+            .gatt("Opening the notification stream")?;
+        peripheral
+            .subscribe(notify_char)
+            .await
+            .gatt("Enabling notifications")?;
         eprintln!("[DEBUG] subscribe: subscribed to notifications");
 
         self.notification_stream = Some(stream);
@@ -327,7 +356,7 @@ impl BleTransport for BtleplugTransport {
             .notify_characteristic
             .as_ref()
             .ok_or(Error::Disconnected)?;
-        Ok(peripheral.read(characteristic).await?)
+        peripheral.read(characteristic).await.gatt("Reading")
     }
 
     fn notify_readable(&self) -> bool {

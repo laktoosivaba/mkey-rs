@@ -1,22 +1,18 @@
-#[cfg(feature = "sdk-virgil")]
-mod virgil;
+//! The high-level entry points: get a key, open a door.
 
 #[cfg(feature = "sdk-virgil")]
-pub use virgil::{
+pub use mkey_sdk_virgil::{
     decrypt_virgil_private_key, derive_virgil_public_key, encrypt_virgil_private_key,
-    generate_rsa_private_key, generate_virgil_key_pair, roundtrip_virgil_public_key, VirgilKeyPair,
-    RSA_KEY_BITS,
+    generate_rsa_private_key, generate_virgil_key_pair, roundtrip_virgil_public_key,
+    Error as VirgilError, VirgilKeyPair, RSA_KEY_BITS,
 };
 
 #[cfg(feature = "ble")]
+use crate::MobileKey;
+#[cfg(feature = "ble")]
+use mkey_ble::{DiscoveredLock, Error, LockFilter, OpeningMode, SaltoLock};
+#[cfg(feature = "ble")]
 use std::time::Duration;
-
-use crate::data::mobile_key::MobileKey;
-#[cfg(feature = "ble")]
-use crate::lock::{OpeningMode, SaltoLock};
-#[cfg(feature = "ble")]
-use crate::transport::LockFilter;
-use crate::Error;
 
 /// Scan for a SALTO lock, connect, authenticate, and open.
 ///
@@ -39,9 +35,7 @@ pub async fn open(
 
     let filter: Option<LockFilter> = lock_name.map(|name| {
         let name = name.to_string();
-        Box::new(move |l: &crate::transport::DiscoveredLock| {
-            l.name.as_deref() == Some(name.as_str())
-        }) as LockFilter
+        Box::new(move |l: &DiscoveredLock| l.name.as_deref() == Some(name.as_str())) as LockFilter
     });
 
     let timeout = scan_timeout.or(Some(Duration::from_secs(30)));
@@ -54,7 +48,7 @@ pub async fn open(
 
 /// Decode a Virgil-encrypted mobile key.
 ///
-/// The Virgil WASM crypto library is embedded in the crate.
+/// The Virgil WASM crypto library is embedded in `mkey-sdk-virgil`.
 ///
 /// # Arguments
 /// * `rsa_private_key_der` — RSA private key in PKCS8 DER format
@@ -68,8 +62,8 @@ pub fn decode(
     rsa_private_key_der: &[u8],
     encrypted_virgil_key: &[u8],
     encrypted_mkey_data: &[u8],
-) -> Result<MobileKey, Error> {
-    virgil::decrypt_mobile_key(
+) -> Result<crate::MobileKey, VirgilError> {
+    mkey_sdk_virgil::decrypt_mobile_key(
         rsa_private_key_der,
         encrypted_virgil_key,
         encrypted_mkey_data,
@@ -87,11 +81,13 @@ pub async fn open_encoded(
     lock_name: Option<&str>,
     mode: OpeningMode,
     scan_timeout: Option<Duration>,
-) -> Result<(), Error> {
+) -> Result<(), Box<dyn std::error::Error>> {
     let mobile_key = decode(
         rsa_private_key_der,
         encrypted_virgil_key,
         encrypted_mkey_data,
     )?;
-    open(mobile_key, lock_name, mode, scan_timeout).await
+    open(mobile_key, lock_name, mode, scan_timeout).await?;
+
+    Ok(())
 }

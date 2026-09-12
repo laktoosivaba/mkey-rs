@@ -1,11 +1,11 @@
-use crate::command::justin::{JustinProtocolManager, JustinState, NoopKeyStore};
-use crate::crypto::encrypt_aes_cbc;
-use crate::data::mobile_key::{GeneralPurposeTag, MobileKey, Permissions};
-use crate::stack::JustinStack0100;
-use crate::transport::{
-    BleTransport, BtleplugTransport, ConnectedLock, DiscoveredLock, LockFilter,
-};
-use crate::Error;
+use crate::traits::{BleTransport, ConnectedLock, DiscoveredLock, LockFilter};
+#[cfg(feature = "btleplug")]
+use crate::BtleplugTransport;
+use mkey_core::command::justin::{JustinProtocolManager, JustinState, NoopKeyStore};
+use mkey_core::crypto::encrypt_aes_cbc;
+use mkey_core::data::mobile_key::{GeneralPurposeTag, MobileKey, Permissions};
+use mkey_core::stack::JustinStack0100;
+use mkey_core::Error;
 use std::time::Duration;
 
 /// Opening mode for the lock operation.
@@ -118,6 +118,7 @@ pub struct SaltoLock<T: BleTransport> {
     detection: Detection,
 }
 
+#[cfg(feature = "btleplug")]
 impl SaltoLock<BtleplugTransport> {
     /// Open a session over the first available Bluetooth adapter.
     pub async fn new() -> Result<Self, Error> {
@@ -342,7 +343,7 @@ impl<T: BleTransport> SaltoLock<T> {
             // BLE v0200: SSP + Justin command layer.
             0 | 2 => {
                 self.mobile_key_v0100 = None;
-                let ssp = crate::security::ssp::SecureProtocolManager::new(mobile_key.kn_key);
+                let ssp = mkey_core::security::ssp::SecureProtocolManager::new(mobile_key.kn_key);
                 let justin = JustinProtocolManager::new_with_key(mobile_key);
                 self.stack = Some(JustinStack0100::new(ssp, justin));
             }
@@ -708,7 +709,8 @@ fn decode_op_result_group(op_result: u8) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transport::{Notification, ProtocolFlags};
+    use crate::traits::Notification;
+    use mkey_core::ProtocolFlags;
 
     /// What the fake lock does when the protocol info is read.
     enum ProtocolInfo {

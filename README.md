@@ -10,6 +10,22 @@ The Rust implementation is reverse engineered from [the original vendor sdk](htt
 - Decoding `mkey_data` into plain TLV using Virgil crypto WASM
 - Generating and verifying the keystore a device registration needs
 
+## Crate layout
+
+One workspace, split along the line between deciding bytes and moving them.
+`mkey` itself is a facade: everything it exports lives in one of the crates
+below.
+
+| crate | what it is | targets |
+|---|---|---|
+| `mkey-core` | the protocol: crypto, mobile key codec, SSP, Justin. No I/O, no async, no clock. | any, `wasm32-unknown-unknown` included |
+| `mkey-ble` | the native shell: the `BleTransport` trait, its btleplug implementation, the session driver | native |
+| `mkey-sdk-virgil` | provisioning: opening a Virgil container, generating the keystore | native |
+
+The split is what lets the protocol be compiled for the browser without a
+Bluetooth stack anywhere in the dependency tree; `cargo check -p mkey-core
+--target wasm32-unknown-unknown` is the check that keeps it honest.
+
 ## Registering a device (keystore)
 
 `mkey_decode` needs a *keystore*: an RSA key that protects a Virgil EC key,
@@ -72,8 +88,12 @@ tokio = { version = "1", features = ["full"] }
 
 | Feature | Description |
 |---------|-------------|
+| `ble` | The native Bluetooth shell: btleplug, tokio, `SaltoLock` (**on by default**) |
 | `sdk` | High-level `sdk::open()` entry point |
 | `sdk-virgil` | Virgil crypto decryption support (includes `sdk`) |
+
+Turn `ble` off (`default-features = false`) and what is left is the protocol
+alone — no Bluetooth stack, no async runtime.
 
 ## Quick Start
 

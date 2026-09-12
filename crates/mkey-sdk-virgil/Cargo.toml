@@ -1,0 +1,18 @@
+[package]
+name = "mkey-sdk-virgil"
+description = "Provisioning: decrypt a SALTO mobile key out of its Virgil container, and generate the keystore that holds the RSA identity."
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+mkey-core.workspace = true
+base64.workspace = true
+hex.workspace = true
+once_cell.workspace = true
+pkcs8.workspace = true
+rand.workspace = true
+rsa.workspace = true
+thiserror.workspace = true
+wasmtime.workspace = true

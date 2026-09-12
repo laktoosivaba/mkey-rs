@@ -12,17 +12,37 @@
 //! rejected with `ERROR_BAD_SEC1_PRIVATE_KEY` (-222), so keystore
 //! generation has to go through [`generate_virgil_key_pair`].
 
+/// Everything provisioning can fail at.
+///
+/// Kept apart from [`mkey_core::Error`] on purpose: none of these failures has
+/// a `SaltoErrorCode`, because none of them can happen at a door. They belong
+/// to the desk where a key is issued, not to the session that spends it.
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    /// The decrypted bytes were not a mobile key.
+    #[error(transparent)]
+    Key(#[from] mkey_core::Error),
+
+    #[error("Virgil container error: {0}")]
+    Container(String),
+
+    #[error("RSA decryption error: {0}")]
+    RsaDecryption(String),
+
+    #[error("WASM runtime error: {0}")]
+    Wasm(String),
+}
+
 use base64::Engine as B64Engine;
 use once_cell::sync::Lazy;
 use pkcs8::{DecodePrivateKey, DecodePublicKey, EncodePrivateKey};
 use rsa::{Pkcs1v15Encrypt, RsaPrivateKey, RsaPublicKey};
 use wasmtime::*;
 
-use crate::data::mobile_key::MobileKey;
-use crate::Error;
+use mkey_core::MobileKey;
 
 /// Embedded Virgil crypto WASM library.
-const VIRGIL_WASM: &[u8] = include_bytes!("../../lib/libfoundation.wasm");
+const VIRGIL_WASM: &[u8] = include_bytes!("../lib/libfoundation.wasm");
 
 /// `vscf_alg_id_SECP256R1` — the curve SaltoKS mobile keys use.
 const ALG_ID_SECP256R1: i32 = 10;
@@ -75,7 +95,7 @@ fn status_name(status: i32) -> &'static str {
 
 /// Build an `Error` for a non-zero `vscf_status_t`.
 fn status_error(op: &str, status: i32) -> Error {
-    Error::WasmError(format!(
+    Error::Wasm(format!(
         "{} failed: Virgil status {} ({})",
         op,
         status,
@@ -103,7 +123,7 @@ macro_rules! wasm_call {
         // this stays inside what the borrow checker accepts.
         let f = &$rt.funcs.$func;
         f.call(&mut $rt.store, $args)
-            .map_err(|e| Error::WasmError(format!("{} trapped: {}", stringify!($func), e)))
+            .map_err(|e| Error::Wasm(format!("{} trapped: {}", stringify!($func), e)))
     }};
 }
 
@@ -208,7 +228,7 @@ fn get_func<P: WasmParams, R: WasmResults>(
 ) -> Result<TypedFunc<P, R>, Error> {
     instance
         .get_typed_func::<P, R>(store, name)
-        .map_err(|e| Error::WasmError(format!("Failed to get WASM function '{}': {}", name, e)))
+        .map_err(|e| Error::Wasm(format!("Failed to get WASM function '{}': {}", name, e)))
 }
 
 /// An instantiated Virgil foundation library with a seeded RNG and a
@@ -234,7 +254,7 @@ struct VirgilRuntime {
 impl VirgilRuntime {
     /// Instantiate the WASM module and set up RNG + key provider.
     fn new() -> Result<Self, Error> {
-        let (engine, module) = COMPILED.as_ref().map_err(|e| Error::WasmError(e.clone()))?;
+        let (engine, module) = COMPILED.as_ref().map_err(|e| Error::Wasm(e.clone()))?;
 
         let mut linker = Linker::new(engine);
         setup_linker(&mut linker)?;
@@ -242,10 +262,10 @@ impl VirgilRuntime {
         let mut store = Store::new(engine, ());
         let instance = linker
             .instantiate(&mut store, module)
-            .map_err(|e| Error::WasmError(format!("Failed to instantiate WASM: {}", e)))?;
+            .map_err(|e| Error::Wasm(format!("Failed to instantiate WASM: {}", e)))?;
         let memory = instance
             .get_memory(&mut store, "o")
-            .ok_or_else(|| Error::WasmError("Failed to get WASM memory".into()))?;
+            .ok_or_else(|| Error::Wasm("Failed to get WASM memory".into()))?;
         let funcs = Funcs::load(&instance, &mut store)?;
 
         let mut rt = Self {
@@ -282,10 +302,7 @@ impl VirgilRuntime {
     fn alloc(&mut self, size: i32) -> Result<i32, Error> {
         let ptr = wasm_call!(self, malloc, size)?;
         if ptr == 0 {
-            return Err(Error::WasmError(format!(
-                "WASM malloc({}) returned null",
-                size
-            )));
+            return Err(Error::Wasm(format!("WASM malloc({}) returned null", size)));
         }
         Ok(ptr)
     }
@@ -295,7 +312,7 @@ impl VirgilRuntime {
         let ptr = self.alloc(data.len() as i32)?;
         self.memory
             .write(&mut self.store, ptr as usize, data)
-            .map_err(|e| Error::WasmError(format!("memory write failed: {}", e)))?;
+            .map_err(|e| Error::Wasm(format!("memory write failed: {}", e)))?;
         Ok(ptr)
     }
 
@@ -304,7 +321,7 @@ impl VirgilRuntime {
         let mut buf = vec![0u8; len.max(0) as usize];
         self.memory
             .read(&self.store, ptr as usize, &mut buf)
-            .map_err(|e| Error::WasmError(format!("memory read failed: {}", e)))?;
+            .map_err(|e| Error::Wasm(format!("memory read failed: {}", e)))?;
         Ok(buf)
     }
 
@@ -320,7 +337,7 @@ impl VirgilRuntime {
     fn new_buffer(&mut self, capacity: i32) -> Result<i32, Error> {
         let buffer = wasm_call!(self, buffer_new_with_capacity, capacity)?;
         if buffer == 0 {
-            return Err(Error::WasmError("vsc_buffer_new returned null".into()));
+            return Err(Error::Wasm("vsc_buffer_new returned null".into()));
         }
         Ok(buffer)
     }
@@ -436,7 +453,7 @@ impl VirgilRuntime {
     fn extract_public_key(&mut self, private_key: i32) -> Result<i32, Error> {
         let key = wasm_call!(self, ecc_private_key_extract_public_key, private_key)?;
         if key == 0 {
-            return Err(Error::WasmError(
+            return Err(Error::Wasm(
                 "ecc_private_key_extract_public_key returned null".into(),
             ));
         }
@@ -461,10 +478,10 @@ impl Drop for VirgilRuntime {
 fn setup_linker(linker: &mut Linker<()>) -> Result<(), Error> {
     linker
         .func_wrap("a", "a", |_a: i32, _b: i32, _c: i32| -> i32 { 0 })
-        .map_err(|e| Error::WasmError(e.to_string()))?;
+        .map_err(|e| Error::Wasm(e.to_string()))?;
     linker
         .func_wrap("a", "b", |_a: i32| -> i32 { 0 })
-        .map_err(|e| Error::WasmError(e.to_string()))?;
+        .map_err(|e| Error::Wasm(e.to_string()))?;
     // fd_write - must write to nwritten or it loops forever
     linker
         .func_wrap(
@@ -485,22 +502,22 @@ fn setup_linker(linker: &mut Linker<()>) -> Result<(), Error> {
                 0
             },
         )
-        .map_err(|e| Error::WasmError(e.to_string()))?;
+        .map_err(|e| Error::Wasm(e.to_string()))?;
     linker
         .func_wrap("a", "d", |_a: i32, _b: i32, _c: i32, _d: i32| -> i32 { 0 })
-        .map_err(|e| Error::WasmError(e.to_string()))?;
+        .map_err(|e| Error::Wasm(e.to_string()))?;
     linker
         .func_wrap("a", "e", |_a: i32, _b: i32| {})
-        .map_err(|e| Error::WasmError(e.to_string()))?;
+        .map_err(|e| Error::Wasm(e.to_string()))?;
     linker
         .func_wrap("a", "f", |_a: i32| {})
-        .map_err(|e| Error::WasmError(e.to_string()))?;
+        .map_err(|e| Error::Wasm(e.to_string()))?;
     linker
         .func_wrap("a", "g", || {})
-        .map_err(|e| Error::WasmError(e.to_string()))?;
+        .map_err(|e| Error::Wasm(e.to_string()))?;
     linker
         .func_wrap("a", "h", |_a: i32, _b: f64| -> i32 { 0 })
-        .map_err(|e| Error::WasmError(e.to_string()))?;
+        .map_err(|e| Error::Wasm(e.to_string()))?;
     // emscripten_get_now
     linker
         .func_wrap("a", "i", || -> f64 {
@@ -510,22 +527,22 @@ fn setup_linker(linker: &mut Linker<()>) -> Result<(), Error> {
                 .unwrap()
                 .as_millis() as f64
         })
-        .map_err(|e| Error::WasmError(e.to_string()))?;
+        .map_err(|e| Error::Wasm(e.to_string()))?;
     linker
         .func_wrap("a", "j", |_a: i32| -> i32 { 0 })
-        .map_err(|e| Error::WasmError(e.to_string()))?;
+        .map_err(|e| Error::Wasm(e.to_string()))?;
     linker
         .func_wrap("a", "k", |_a: i32, _b: i32, _c: i32, _d: i32| -> i32 { 0 })
-        .map_err(|e| Error::WasmError(e.to_string()))?;
+        .map_err(|e| Error::Wasm(e.to_string()))?;
     linker
         .func_wrap("a", "l", |_a: i32, _b: i64, _c: i32, _d: i32| -> i32 { 0 })
-        .map_err(|e| Error::WasmError(e.to_string()))?;
+        .map_err(|e| Error::Wasm(e.to_string()))?;
     linker
         .func_wrap("a", "m", |_a: i32, _b: i32, _c: i32| -> i32 { 0 })
-        .map_err(|e| Error::WasmError(e.to_string()))?;
+        .map_err(|e| Error::Wasm(e.to_string()))?;
     linker
         .func_wrap("a", "n", || {})
-        .map_err(|e| Error::WasmError(e.to_string()))?;
+        .map_err(|e| Error::Wasm(e.to_string()))?;
     Ok(())
 }
 
@@ -563,14 +580,12 @@ pub fn parse_virgil_container(data: &[u8]) -> Result<VirgilContainer<'_>, Error>
     let marker_pos = data
         .windows(marker.len())
         .position(|w| w == marker)
-        .ok_or_else(|| {
-            Error::VirgilContainerError("VIRGIL-DATA-SIGNATURE marker not found".into())
-        })?;
+        .ok_or_else(|| Error::Container("VIRGIL-DATA-SIGNATURE marker not found".into()))?;
 
     let after_marker = &data[marker_pos + marker.len()..];
 
     if after_marker.is_empty() || after_marker[0] != 0x30 {
-        return Err(Error::VirgilContainerError(
+        return Err(Error::Container(
             "Expected SEQUENCE tag (0x30) at start of message_info".into(),
         ));
     }
@@ -583,7 +598,7 @@ pub fn parse_virgil_container(data: &[u8]) -> Result<VirgilContainer<'_>, Error>
         let len = ((after_marker[2] as usize) << 8) | (after_marker[3] as usize);
         (len, 4usize)
     } else {
-        return Err(Error::VirgilContainerError(format!(
+        return Err(Error::Container(format!(
             "Unsupported ASN.1 length encoding: 0x{:02x}",
             after_marker[1]
         )));
@@ -594,7 +609,7 @@ pub fn parse_virgil_container(data: &[u8]) -> Result<VirgilContainer<'_>, Error>
     let encrypted_content = &after_marker[msg_info_total_len..];
 
     let recipient_id = extract_recipient_id(message_info).ok_or_else(|| {
-        Error::VirgilContainerError("Failed to extract recipient_id from message_info".into())
+        Error::Container("Failed to extract recipient_id from message_info".into())
     })?;
 
     Ok(VirgilContainer {
@@ -661,10 +676,10 @@ pub fn roundtrip_virgil_public_key(public_key_der: &[u8]) -> Result<Vec<u8>, Err
 pub fn generate_rsa_private_key() -> Result<Vec<u8>, Error> {
     let mut rng = rand::thread_rng();
     let key = RsaPrivateKey::new(&mut rng, RSA_KEY_BITS)
-        .map_err(|e| Error::RsaDecryptionError(format!("RSA key generation failed: {}", e)))?;
+        .map_err(|e| Error::RsaDecryption(format!("RSA key generation failed: {}", e)))?;
     let der = key
         .to_pkcs8_der()
-        .map_err(|e| Error::RsaDecryptionError(format!("PKCS8 encoding failed: {}", e)))?;
+        .map_err(|e| Error::RsaDecryption(format!("PKCS8 encoding failed: {}", e)))?;
     Ok(der.as_bytes().to_vec())
 }
 
@@ -679,7 +694,7 @@ fn rsa_public_key(rsa_key_der: &[u8]) -> Result<RsaPublicKey, Error> {
     RsaPrivateKey::from_pkcs8_der(rsa_key_der)
         .map(|k| k.to_public_key())
         .map_err(|e| {
-            Error::RsaDecryptionError(format!(
+            Error::RsaDecryption(format!(
                 "Not an RSA public key (SPKI/PKCS1) nor a PKCS8 private key: {}",
                 e
             ))
@@ -703,7 +718,7 @@ pub fn encrypt_virgil_private_key(
     let mut rng = rand::thread_rng();
     public_key
         .encrypt(&mut rng, Pkcs1v15Encrypt, wrapped.as_bytes())
-        .map_err(|e| Error::RsaDecryptionError(format!("RSA encryption failed: {}", e)))
+        .map_err(|e| Error::RsaDecryption(format!("RSA encryption failed: {}", e)))
 }
 
 /// Decrypt the Virgil EC private key using RSA PKCS1v15.
@@ -715,18 +730,18 @@ pub fn decrypt_virgil_private_key(
     encrypted_key: &[u8],
 ) -> Result<Vec<u8>, Error> {
     let rsa_private_key = RsaPrivateKey::from_pkcs8_der(rsa_key_der)
-        .map_err(|e| Error::RsaDecryptionError(format!("Failed to parse RSA key: {}", e)))?;
+        .map_err(|e| Error::RsaDecryption(format!("Failed to parse RSA key: {}", e)))?;
 
     let decrypted_b64 = rsa_private_key
         .decrypt(Pkcs1v15Encrypt, encrypted_key)
-        .map_err(|e| Error::RsaDecryptionError(format!("RSA decryption failed: {}", e)))?;
+        .map_err(|e| Error::RsaDecryption(format!("RSA decryption failed: {}", e)))?;
 
     let decrypted_str = String::from_utf8(decrypted_b64)
-        .map_err(|e| Error::RsaDecryptionError(format!("Decrypted key not valid UTF-8: {}", e)))?;
+        .map_err(|e| Error::RsaDecryption(format!("Decrypted key not valid UTF-8: {}", e)))?;
 
     base64::engine::general_purpose::STANDARD
         .decode(decrypted_str.trim())
-        .map_err(|e| Error::RsaDecryptionError(format!("Base64 decode failed: {}", e)))
+        .map_err(|e| Error::RsaDecryption(format!("Base64 decode failed: {}", e)))
 }
 
 /// Decrypt a Virgil-encrypted mobile key using the embedded WASM Virgil crypto library.
@@ -813,13 +828,13 @@ pub fn decrypt_mobile_key(
     let _ = wasm_call!(rt, recipient_cipher_delete, recipient_cipher);
 
     if decrypted.is_empty() {
-        return Err(Error::WasmError("Decryption produced no output".into()));
+        return Err(Error::Wasm("Decryption produced no output".into()));
     }
 
-    MobileKey::from_bytes(&decrypted)
+    Ok(MobileKey::from_bytes(&decrypted)?)
 }
 
-#[cfg(all(test, feature = "sdk-virgil"))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use pkcs8::EncodePublicKey;
@@ -927,7 +942,7 @@ mod tests {
     #[test]
     fn container_without_the_marker_is_rejected() {
         let err = parse_virgil_container(&[0x30, 0x02, 0x00, 0x00]).unwrap_err();
-        assert!(matches!(err, Error::VirgilContainerError(_)), "got {}", err);
+        assert!(matches!(err, Error::Container(_)), "got {}", err);
     }
 
     #[test]

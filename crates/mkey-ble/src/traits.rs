@@ -2,7 +2,7 @@
 //!
 //! Defines the abstract interface for BLE communication with SALTO locks.
 
-use crate::Error;
+use mkey_core::{Error, ProtocolFlags};
 use std::time::Duration;
 
 /// Information about a discovered SALTO lock.
@@ -28,50 +28,6 @@ pub struct DiscoveredLock {
 pub struct ConnectedLock {
     /// Information about the connected lock.
     pub info: DiscoveredLock,
-}
-
-/// Protocol flags parsed from SALTO advertisement data.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct ProtocolFlags {
-    /// Proximity mode: false = NEAR, true = REMOTE
-    pub remote: bool,
-    /// Messages available: false = NO_MESSAGES, true = WITH_MESSAGES
-    pub has_messages: bool,
-    /// RF3 state
-    pub rf3_state: Rf3State,
-}
-
-impl ProtocolFlags {
-    /// Parse protocol flags from the advertisement byte.
-    pub fn from_byte(byte: u8) -> Self {
-        Self {
-            remote: (byte & 0x01) != 0,
-            has_messages: (byte & 0x04) != 0,
-            rf3_state: Rf3State::from_bits((byte >> 4) & 0x03),
-        }
-    }
-}
-
-/// RF3 state from advertisement flags.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum Rf3State {
-    #[default]
-    Off = 0,
-    Ini = 1,
-    Link = 2,
-    Lost = 3,
-}
-
-impl Rf3State {
-    fn from_bits(bits: u8) -> Self {
-        match bits {
-            0 => Self::Off,
-            1 => Self::Ini,
-            2 => Self::Link,
-            3 => Self::Lost,
-            _ => Self::Off,
-        }
-    }
 }
 
 /// Notification received from the lock.
@@ -155,7 +111,3 @@ pub const SALTO_NOTIFY_UUID: uuid::Uuid =
 /// SALTO BLE write characteristic UUID (Phone → Lock).
 pub const SALTO_WRITE_UUID: uuid::Uuid =
     uuid::Uuid::from_u128(0xB6E60003_E2E3_BC82_4C72_929D0D29CA17);
-
-/// SALTO manufacturer ID bytes in advertisement data.
-/// Company ID is 0x0199 (little-endian: 0x99, 0x01).
-pub const SALTO_MANUFACTURER_ID: u16 = 0x0199;

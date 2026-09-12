@@ -1,0 +1,23 @@
+[package]
+name = "mkey-core"
+description = "SALTO KS protocol: crypto primitives, mobile key codec, SSP and Justin. No I/O."
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+aes.workspace = true
+base62.workspace = true
+cbc.workspace = true
+getrandom.workspace = true
+hex.workspace = true
+iso7816-tlv.workspace = true
+num-bigint.workspace = true
+once_cell.workspace = true
+thiserror.workspace = true
+
+# Two halves are needed to give `getrandom` a browser backend: this feature,
+# and the `--cfg getrandom_backend="wasm_js"` rustflag in `.cargo/config.toml`.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { workspace = true, features = ["wasm_js"] }
