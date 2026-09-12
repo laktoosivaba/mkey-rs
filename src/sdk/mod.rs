@@ -8,10 +8,13 @@ pub use virgil::{
     RSA_KEY_BITS,
 };
 
+#[cfg(feature = "ble")]
 use std::time::Duration;
 
 use crate::data::mobile_key::MobileKey;
+#[cfg(feature = "ble")]
 use crate::lock::{OpeningMode, SaltoLock};
+#[cfg(feature = "ble")]
 use crate::transport::LockFilter;
 use crate::Error;
 
@@ -25,6 +28,7 @@ use crate::Error;
 /// * `lock_name` — optional lock name filter (connects to first matching lock)
 /// * `mode` — `OpeningMode::Standard` or `OpeningMode::Office`
 /// * `scan_timeout` — maximum time to scan for a lock (default: 30s)
+#[cfg(feature = "ble")]
 pub async fn open(
     mobile_key: MobileKey,
     lock_name: Option<&str>,
@@ -75,7 +79,7 @@ pub fn decode(
 /// Decode a Virgil-encrypted mobile key, then open the lock.
 ///
 /// Combines `decode` and `open` into a single call.
-#[cfg(feature = "sdk-virgil")]
+#[cfg(all(feature = "sdk-virgil", feature = "ble"))]
 pub async fn open_encoded(
     rsa_private_key_der: &[u8],
     encrypted_virgil_key: &[u8],

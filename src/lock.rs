@@ -24,6 +24,68 @@ const DEFAULT_SCAN_DURATION: Duration = Duration::from_secs(5);
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 const DEFAULT_START_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// BER-TLV app protocol request: private tag 0, one byte of value `0x01`.
+const APP_PROTOCOL_REQUEST: [u8; 3] = [0xC0, 0x01, 0x01];
+/// How long the lock is given to answer the protocol info read.
+const PROTOCOL_INFO_READ_TIMEOUT: Duration = Duration::from_millis(1000);
+const PROTOCOL_INFO_PREFIX: u8 = 0x01;
+const PROTOCOL_INFO_LENGTH: usize = 3;
+const PROTOCOL_INFO_MAJOR_INDEX: usize = 2;
+
+/// How the session works out which stack the lock speaks, before it subscribes.
+///
+/// The reference sequence is [`Detection::AppProtocol`]: write the app protocol
+/// request, then read the protocol info back off the notify characteristic. The
+/// other modes exist because a lock can drop the link during that handshake, and
+/// the only way to tell which half it objected to is to leave one out. One real
+/// lock does exactly this: it acknowledges the `c0 01 01` write and then kills
+/// the link on the following read, and only [`Detection::ReadOnly`] opens it.
+///
+/// A failed detection is never fatal in any mode — the version simply stays
+/// unknown and the v0200 flow runs. Only the lock dropping the link is.
+///
+/// Mirrors `VersionDetection` in mkey-js (`session/open-lock.ts`), with
+/// [`Detection::Auto`] standing in for that port's `detectionForAdvertisement`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Detection {
+    /// Pick the mode from the advertisement, then run it.
+    ///
+    /// A lock that advertises a SALTO manufacturer record gets
+    /// [`Detection::AppProtocol`]; a lock recognised by its service UUID alone
+    /// gets [`Detection::ReadOnly`]. This is the rule mkey-rs has always
+    /// followed on hardware, and it is resolved here, in the shell that can see
+    /// the advertisement — the session itself only ever sees a concrete mode.
+    #[default]
+    Auto,
+    /// Write the app protocol request, then read the protocol info.
+    AppProtocol,
+    /// Read the protocol info without announcing the app protocol first.
+    ReadOnly,
+    /// Ask nothing at all: subscribe straight away, version unknown.
+    None,
+}
+
+impl Detection {
+    /// The mode [`Detection::Auto`] resolves to for a given advertised version.
+    ///
+    /// `0` means the lock was recognised by its service UUID alone, i.e. it
+    /// carried no SALTO manufacturer record.
+    pub fn for_advertised_version(advertised_version: u8) -> Self {
+        if advertised_version == 0 {
+            Self::ReadOnly
+        } else {
+            Self::AppProtocol
+        }
+    }
+
+    fn resolve(self, advertised_version: u8) -> Self {
+        match self {
+            Self::Auto => Self::for_advertised_version(advertised_version),
+            concrete => concrete,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LockState {
     Disconnected,
@@ -43,24 +105,48 @@ impl std::fmt::Display for LockState {
     }
 }
 
-pub struct SaltoLock {
-    transport: BtleplugTransport,
+/// The phone side of a SALTO session, driven over any [`BleTransport`].
+///
+/// The transport is a type parameter so the same session logic runs against
+/// btleplug on a desktop and against an in-process simulator in the tests.
+pub struct SaltoLock<T: BleTransport> {
+    transport: T,
     connected_lock: Option<ConnectedLock>,
     stack: Option<JustinStack0100<NoopKeyStore>>,
     mobile_key_v0100: Option<MobileKey>,
     state: LockState,
+    detection: Detection,
 }
 
-impl SaltoLock {
+impl SaltoLock<BtleplugTransport> {
+    /// Open a session over the first available Bluetooth adapter.
     pub async fn new() -> Result<Self, Error> {
-        let transport = BtleplugTransport::new().await?;
-        Ok(Self {
+        Ok(Self::with_transport(BtleplugTransport::new().await?))
+    }
+}
+
+impl<T: BleTransport> SaltoLock<T> {
+    /// Build a session over an arbitrary transport.
+    pub fn with_transport(transport: T) -> Self {
+        Self {
             transport,
             connected_lock: None,
             stack: None,
             mobile_key_v0100: None,
             state: LockState::Disconnected,
-        })
+            detection: Detection::default(),
+        }
+    }
+
+    /// Choose how the protocol version is detected. Defaults to [`Detection::Auto`].
+    pub fn with_detection(mut self, detection: Detection) -> Self {
+        self.detection = detection;
+        self
+    }
+
+    /// Choose how the protocol version is detected, after construction.
+    pub fn set_detection(&mut self, detection: Detection) {
+        self.detection = detection;
     }
 
     pub fn state(&self) -> LockState {
@@ -107,12 +193,7 @@ impl SaltoLock {
         let timeout = timeout.unwrap_or(DEFAULT_SCAN_DURATION);
         let connected = self.transport.scan_and_connect(timeout, filter).await?;
 
-        self.connected_lock = Some(connected);
-        self.stack = None;
-        self.mobile_key_v0100 = None;
-        self.state = LockState::Connected;
-
-        Ok(&self.connected_lock.as_ref().unwrap().info)
+        self.after_connect(connected).await
     }
 
     /// Connect to a previously discovered lock by its ID.
@@ -136,12 +217,101 @@ impl SaltoLock {
         let timeout = timeout.unwrap_or(DEFAULT_TIMEOUT);
         let connected = self.transport.connect_by_id(lock_id, timeout).await?;
 
+        self.after_connect(connected).await
+    }
+
+    /// Record a fresh connection and work out which stack the lock speaks.
+    ///
+    /// Detection has to happen here, between connecting and subscribing: the
+    /// lock starts driving the exchange as soon as notifications are enabled.
+    async fn after_connect(&mut self, connected: ConnectedLock) -> Result<&DiscoveredLock, Error> {
         self.connected_lock = Some(connected);
         self.stack = None;
         self.mobile_key_v0100 = None;
         self.state = LockState::Connected;
 
+        let advertised = self.connected_lock.as_ref().unwrap().info.protocol_version;
+        if let Some(major) = self.detect_protocol_version(advertised).await {
+            self.connected_lock.as_mut().unwrap().info.protocol_version = major;
+        }
+
         Ok(&self.connected_lock.as_ref().unwrap().info)
+    }
+
+    /// Ask the lock which protocol stack it speaks, before notifications are enabled.
+    ///
+    /// Returns `None` when the version could not be established — which is not
+    /// an error: the caller keeps whatever the advertisement claimed, and an
+    /// unknown version runs the v0200 flow.
+    async fn detect_protocol_version(&mut self, advertised_version: u8) -> Option<u8> {
+        match self.detection.resolve(advertised_version) {
+            Detection::None => {
+                eprintln!("[DEBUG] detection: skipped, subscribing straight away");
+                return None;
+            }
+            Detection::AppProtocol => {
+                if !self.transport.notify_readable() {
+                    eprintln!("[DEBUG] detection: notify characteristic is not readable");
+                    return None;
+                }
+
+                // Not fatal. At least one lock acknowledges this write and then drops
+                // the link on the read that follows; losing the version is better than
+                // losing the session, and `Detection::ReadOnly` exists for that lock.
+                match self.transport.write(&APP_PROTOCOL_REQUEST).await {
+                    Ok(()) => eprintln!(
+                        "[DEBUG] detection: wrote app protocol request {:02X?}",
+                        APP_PROTOCOL_REQUEST
+                    ),
+                    Err(e) => eprintln!("[DEBUG] detection: app protocol request failed: {}", e),
+                }
+            }
+            Detection::ReadOnly => {
+                if !self.transport.notify_readable() {
+                    eprintln!("[DEBUG] detection: notify characteristic is not readable");
+                    return None;
+                }
+            }
+            Detection::Auto => unreachable!("resolve() never returns Auto"),
+        }
+
+        let read = tokio::time::timeout(
+            PROTOCOL_INFO_READ_TIMEOUT,
+            self.transport.read_notify_value(),
+        )
+        .await;
+
+        let info = match read {
+            Ok(Ok(info)) => info,
+            Ok(Err(e)) => {
+                eprintln!("[DEBUG] detection: protocol info read failed: {}", e);
+                return None;
+            }
+            Err(_) => {
+                eprintln!(
+                    "[DEBUG] detection: no protocol info within {} ms",
+                    PROTOCOL_INFO_READ_TIMEOUT.as_millis()
+                );
+                return None;
+            }
+        };
+
+        eprintln!(
+            "[DEBUG] detection: protocol info ({} bytes): {:02X?}",
+            info.len(),
+            info
+        );
+
+        if info.len() >= PROTOCOL_INFO_LENGTH && info[0] == PROTOCOL_INFO_PREFIX {
+            // The version is two little-endian bytes; the Java SDK reverses them
+            // before printing, so `major` is the second of the pair.
+            let major = info[PROTOCOL_INFO_MAJOR_INDEX];
+            eprintln!("[DEBUG] detection: major={} minor={}", major, info[1]);
+            return Some(major);
+        }
+
+        eprintln!("[DEBUG] detection: protocol info has an unexpected shape");
+        None
     }
 
     /// Get information about the currently connected lock.
@@ -249,7 +419,7 @@ impl SaltoLock {
     }
 
     async fn open_inner_v0200(&mut self) -> Result<(), Error> {
-        self.transport.ensure_subscribed().await?;
+        self.transport.subscribe().await?;
 
         // Continue responding to lock-driven Justin commands (now typically encrypted).
         let mut first_packet = true;
@@ -329,7 +499,7 @@ impl SaltoLock {
             (key.tag_1.clone(), key.kn_key)
         };
 
-        self.transport.ensure_subscribed().await?;
+        self.transport.subscribe().await?;
 
         // WRITE_IDD_AND_AT
         let mut idd_at = Vec::with_capacity(1 + tag_1.len());
@@ -532,5 +702,231 @@ fn decode_op_result_group(op_result: u8) -> &'static str {
         2 => "ACCEPTED",
         3 => "REJECTED",
         _ => "INVALID",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::transport::{Notification, ProtocolFlags};
+
+    /// What the fake lock does when the protocol info is read.
+    enum ProtocolInfo {
+        /// Answer with these bytes.
+        Value(Vec<u8>),
+        /// Fail the read, as a lock that dropped the link would.
+        Fails,
+        /// Never answer, so the read has to time out.
+        Silent,
+    }
+
+    /// A lock that only knows how to be connected to and interrogated.
+    ///
+    /// Everything the session does before it subscribes is observable here:
+    /// which bytes were written, and how many times the notify characteristic
+    /// was read.
+    struct FakeLock {
+        advertised_version: u8,
+        notify_readable: bool,
+        protocol_info: ProtocolInfo,
+        write_fails: bool,
+        writes: Vec<Vec<u8>>,
+        reads: usize,
+    }
+
+    impl FakeLock {
+        fn new(advertised_version: u8, protocol_info: ProtocolInfo) -> Self {
+            Self {
+                advertised_version,
+                notify_readable: true,
+                protocol_info,
+                write_fails: false,
+                writes: Vec::new(),
+                reads: 0,
+            }
+        }
+
+        fn answering(advertised_version: u8, major: u8) -> Self {
+            Self::new(
+                advertised_version,
+                ProtocolInfo::Value(vec![0x01, 0x00, major]),
+            )
+        }
+    }
+
+    impl BleTransport for FakeLock {
+        async fn scan(&self, _duration: Duration) -> Result<Vec<DiscoveredLock>, Error> {
+            unimplemented!("the tests connect by id")
+        }
+
+        async fn scan_and_connect(
+            &mut self,
+            _timeout: Duration,
+            _filter: Option<LockFilter>,
+        ) -> Result<ConnectedLock, Error> {
+            unimplemented!("the tests connect by id")
+        }
+
+        async fn connect_by_id(
+            &mut self,
+            lock_id: &str,
+            _timeout: Duration,
+        ) -> Result<ConnectedLock, Error> {
+            Ok(ConnectedLock {
+                info: DiscoveredLock {
+                    id: lock_id.to_string(),
+                    name: None,
+                    rssi: None,
+                    protocol_version: self.advertised_version,
+                    flags: ProtocolFlags::default(),
+                },
+            })
+        }
+
+        async fn disconnect(&mut self) -> Result<(), Error> {
+            Ok(())
+        }
+
+        fn is_connected(&self) -> bool {
+            true
+        }
+
+        async fn write(&mut self, data: &[u8]) -> Result<(), Error> {
+            self.writes.push(data.to_vec());
+            if self.write_fails {
+                return Err(Error::Disconnected);
+            }
+            Ok(())
+        }
+
+        async fn receive(&mut self) -> Result<Option<Notification>, Error> {
+            unimplemented!("the tests stop before the exchange")
+        }
+
+        async fn subscribe(&mut self) -> Result<(), Error> {
+            unimplemented!("the tests stop before the exchange")
+        }
+
+        async fn read_notify_value(&mut self) -> Result<Vec<u8>, Error> {
+            self.reads += 1;
+            match &self.protocol_info {
+                ProtocolInfo::Value(bytes) => Ok(bytes.clone()),
+                ProtocolInfo::Fails => Err(Error::Disconnected),
+                ProtocolInfo::Silent => std::future::pending().await,
+            }
+        }
+
+        fn notify_readable(&self) -> bool {
+            self.notify_readable
+        }
+    }
+
+    /// Connect with the given detection mode and report what the lock saw.
+    async fn detect(lock: FakeLock, detection: Detection) -> (u8, Vec<Vec<u8>>, usize) {
+        let mut session = SaltoLock::with_transport(lock).with_detection(detection);
+        let version = session
+            .connect_by_id("fake", None)
+            .await
+            .expect("connect")
+            .protocol_version;
+
+        (version, session.transport.writes, session.transport.reads)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn auto_announces_the_app_protocol_to_a_lock_that_advertises_one() {
+        let (version, writes, reads) = detect(FakeLock::answering(2, 2), Detection::Auto).await;
+
+        assert_eq!(writes, vec![APP_PROTOCOL_REQUEST.to_vec()]);
+        assert_eq!(reads, 1);
+        assert_eq!(version, 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn auto_stays_silent_with_a_lock_found_by_service_uuid_alone() {
+        // This is the lock from the field: it acknowledges `c0 01 01` and then
+        // drops the link, and it advertises no SALTO manufacturer record.
+        let (version, writes, reads) = detect(FakeLock::answering(0, 2), Detection::Auto).await;
+
+        assert!(writes.is_empty(), "nothing may be written before the read");
+        assert_eq!(reads, 1);
+        assert_eq!(version, 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn read_only_never_writes_even_for_an_advertised_lock() {
+        let (version, writes, reads) = detect(FakeLock::answering(2, 1), Detection::ReadOnly).await;
+
+        assert!(writes.is_empty());
+        assert_eq!(reads, 1);
+        assert_eq!(version, 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn none_asks_nothing_and_keeps_the_advertised_version() {
+        let (version, writes, reads) = detect(FakeLock::answering(2, 1), Detection::None).await;
+
+        assert!(writes.is_empty());
+        assert_eq!(reads, 0);
+        assert_eq!(version, 2, "the advertised version is left alone");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_app_protocol_write_is_not_fatal() {
+        let mut lock = FakeLock::answering(2, 2);
+        lock.write_fails = true;
+
+        let (version, writes, reads) = detect(lock, Detection::AppProtocol).await;
+
+        assert_eq!(writes, vec![APP_PROTOCOL_REQUEST.to_vec()]);
+        assert_eq!(reads, 1, "the read still happens");
+        assert_eq!(version, 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_unreadable_notify_characteristic_leaves_the_version_alone() {
+        let mut lock = FakeLock::answering(2, 1);
+        lock.notify_readable = false;
+
+        let (version, writes, reads) = detect(lock, Detection::AppProtocol).await;
+
+        assert!(writes.is_empty(), "no point announcing what cannot be read");
+        assert_eq!(reads, 0);
+        assert_eq!(version, 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_read_leaves_the_version_alone() {
+        let lock = FakeLock::new(2, ProtocolInfo::Fails);
+
+        let (version, _writes, reads) = detect(lock, Detection::AppProtocol).await;
+
+        assert_eq!(reads, 1);
+        assert_eq!(version, 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_silent_lock_times_out_without_failing_the_connection() {
+        let lock = FakeLock::new(0, ProtocolInfo::Silent);
+
+        let (version, _writes, reads) = detect(lock, Detection::Auto).await;
+
+        assert_eq!(reads, 1);
+        assert_eq!(version, 0, "still unknown, which runs the v0200 flow");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn protocol_info_of_an_unexpected_shape_is_ignored() {
+        for info in [vec![], vec![0x01, 0x00], vec![0x02, 0x00, 0x01]] {
+            let lock = FakeLock::new(2, ProtocolInfo::Value(info.clone()));
+
+            let (version, _writes, reads) = detect(lock, Detection::ReadOnly).await;
+
+            assert_eq!(reads, 1);
+            assert_eq!(
+                version, 2,
+                "unexpected shape {info:02X?} must not change the version"
+            );
+        }
     }
 }

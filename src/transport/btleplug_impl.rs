@@ -42,41 +42,6 @@ impl BtleplugTransport {
         })
     }
 
-    pub async fn read_notify_characteristic(&mut self) -> Result<Vec<u8>, Error> {
-        let peripheral = self.peripheral.as_ref().ok_or(Error::Disconnected)?;
-        let characteristic = self
-            .notify_characteristic
-            .as_ref()
-            .ok_or(Error::Disconnected)?;
-        Ok(peripheral.read(characteristic).await?)
-    }
-
-    /// Ensure notifications are enabled and a notification stream is available.
-    ///
-    /// The SALTO lock starts its exchange only after CCCD is enabled; subscribing too early can
-    /// cause the lock to time out before higher layers are ready to respond. We therefore defer
-    /// subscription until the operation starts (open/auth flows).
-    pub async fn ensure_subscribed(&mut self) -> Result<(), Error> {
-        if self.notification_stream.is_some() {
-            return Ok(());
-        }
-
-        let peripheral = self.peripheral.as_ref().ok_or(Error::Disconnected)?;
-        let notify_char = self
-            .notify_characteristic
-            .as_ref()
-            .ok_or(Error::Disconnected)?;
-
-        // Create the stream first so we don't miss the first notification after CCCD is enabled.
-        let stream = peripheral.notifications().await?;
-        peripheral.subscribe(notify_char).await?;
-        eprintln!("[DEBUG] ensure_subscribed: subscribed to notifications");
-
-        self.notification_stream = Some(stream);
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        Ok(())
-    }
-
     async fn find_characteristic(
         peripheral: &Peripheral,
         uuid: uuid::Uuid,
@@ -92,10 +57,14 @@ impl BtleplugTransport {
     }
 
     /// Core connection logic - connects to peripheral and sets up characteristics.
+    ///
+    /// Deliberately stops at "the link is up and the characteristics are known". Working
+    /// out which stack the lock speaks is protocol, not transport, and it lives in the
+    /// session layer (`lock.rs::detect_protocol_version`).
     async fn connect_to_peripheral(
         &mut self,
         peripheral: Peripheral,
-        mut info: DiscoveredLock,
+        info: DiscoveredLock,
     ) -> Result<ConnectedLock, Error> {
         eprintln!("[DEBUG] connect_to_peripheral: connecting...");
         peripheral.connect().await?;
@@ -125,63 +94,6 @@ impl BtleplugTransport {
             notify_char.properties,
             notify_char.descriptors.len()
         );
-
-        // Determine stack version (0100/0200) the same way as the official SDK:
-        // 1) write app protocol (BER TLV: private tag 0, value 0x01)
-        // 2) read protocol info from notify characteristic (0x01 + 2-byte LE version)
-        //
-        // This must happen before enabling notifications; otherwise some locks start the
-        // exchange immediately and time out while we are still setting up higher layers.
-        if notify_char.properties.contains(CharPropFlags::READ) {
-            // Legacy locks (detected only by service UUID) do not require the app protocol write.
-            if info.protocol_version != 0 {
-                let app_protocol = [0xC0, 0x01, 0x01];
-                let write_type = if write_char.properties.contains(CharPropFlags::WRITE) {
-                    WriteType::WithResponse
-                } else {
-                    WriteType::WithoutResponse
-                };
-                eprintln!("[DEBUG] connect_to_peripheral: writing app protocol");
-                peripheral
-                    .write(&write_char, &app_protocol, write_type)
-                    .await?;
-            }
-
-            eprintln!("[DEBUG] connect_to_peripheral: reading protocol info");
-            match tokio::time::timeout(Duration::from_secs(1), peripheral.read(&notify_char)).await
-            {
-                Ok(Ok(data)) => {
-                    eprintln!(
-                        "[DEBUG] connect_to_peripheral: protocol info ({} bytes): {:02X?}",
-                        data.len(),
-                        data
-                    );
-                    if data.len() >= 3 && data[0] == 0x01 {
-                        // Version is 2 bytes LE in the payload (Java reverses it before printing).
-                        let major = data[2];
-                        let minor = data[1];
-                        eprintln!(
-                            "[DEBUG] connect_to_peripheral: stack version bytes LE={:02X}{:02X} (major={}, minor={})",
-                            minor,
-                            major,
-                            major,
-                            minor
-                        );
-                        // We only support 0100 and 0200 at the moment; store major as 1 or 2.
-                        info.protocol_version = major;
-                    }
-                }
-                Ok(Err(e)) => eprintln!(
-                    "[DEBUG] connect_to_peripheral: protocol info read error: {}",
-                    e
-                ),
-                Err(_) => eprintln!("[DEBUG] connect_to_peripheral: protocol info read timeout"),
-            }
-        } else {
-            eprintln!(
-                "[DEBUG] connect_to_peripheral: notify characteristic is not readable; cannot detect stack version"
-            );
-        }
 
         // Store connection state
         self.peripheral = Some(peripheral);
@@ -386,5 +298,41 @@ impl BleTransport for BtleplugTransport {
                 Ok(None)
             }
         }
+    }
+
+    async fn subscribe(&mut self) -> Result<(), Error> {
+        if self.notification_stream.is_some() {
+            return Ok(());
+        }
+
+        let peripheral = self.peripheral.as_ref().ok_or(Error::Disconnected)?;
+        let notify_char = self
+            .notify_characteristic
+            .as_ref()
+            .ok_or(Error::Disconnected)?;
+
+        // Create the stream first so we don't miss the first notification after CCCD is enabled.
+        let stream = peripheral.notifications().await?;
+        peripheral.subscribe(notify_char).await?;
+        eprintln!("[DEBUG] subscribe: subscribed to notifications");
+
+        self.notification_stream = Some(stream);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        Ok(())
+    }
+
+    async fn read_notify_value(&mut self) -> Result<Vec<u8>, Error> {
+        let peripheral = self.peripheral.as_ref().ok_or(Error::Disconnected)?;
+        let characteristic = self
+            .notify_characteristic
+            .as_ref()
+            .ok_or(Error::Disconnected)?;
+        Ok(peripheral.read(characteristic).await?)
+    }
+
+    fn notify_readable(&self) -> bool {
+        self.notify_characteristic
+            .as_ref()
+            .is_some_and(|c| c.properties.contains(CharPropFlags::READ))
     }
 }

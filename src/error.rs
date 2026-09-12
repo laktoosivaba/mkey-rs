@@ -56,6 +56,7 @@ pub enum Error {
     #[error("Invalid data received: {0}")]
     InvalidData(String),
 
+    #[cfg(feature = "ble")]
     #[error("BLE error: {0}")]
     BleError(#[from] btleplug::Error),
 

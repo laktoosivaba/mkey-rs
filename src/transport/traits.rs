@@ -118,6 +118,30 @@ pub trait BleTransport {
 
     /// Receive the next notification from the lock.
     async fn receive(&mut self) -> Result<Option<Notification>, Error>;
+
+    /// Enable notifications on the notify characteristic (CCCD).
+    ///
+    /// Must be idempotent: the session layer calls it once per exchange and
+    /// does not track whether a previous call already subscribed.
+    ///
+    /// Ordering matters. The lock starts driving the exchange as soon as
+    /// notifications are enabled, so everything the phone wants to do first —
+    /// version detection above all — has to happen before this call, and the
+    /// implementation has to have the notification sink in place before the
+    /// CCCD write, or the first packet is lost.
+    async fn subscribe(&mut self) -> Result<(), Error>;
+
+    /// Read the notify characteristic directly.
+    ///
+    /// Used only for protocol info (`01 <minor> <major>`) during version
+    /// detection, before notifications are enabled.
+    async fn read_notify_value(&mut self) -> Result<Vec<u8>, Error>;
+
+    /// Whether the notify characteristic advertises the READ property.
+    ///
+    /// When it does not, the protocol info cannot be read and the version
+    /// stays unknown; the session then runs the v0200 flow.
+    fn notify_readable(&self) -> bool;
 }
 
 /// SALTO BLE GATT service UUID.
