@@ -11,6 +11,7 @@ pub mod command;
 pub mod crypto;
 pub mod data;
 pub mod error;
+pub mod op_result;
 pub mod security;
 pub mod stack;
 
@@ -19,3 +20,4 @@ pub use advertisement::{
 };
 pub use data::mobile_key::MobileKey;
 pub use error::{CommandStatus, Error, ErrorCode};
+pub use op_result::{decode_op_result, OpResultGroup};

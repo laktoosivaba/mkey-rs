@@ -17,12 +17,14 @@ mod btleplug_impl;
 #[cfg(feature = "btleplug")]
 mod gatt;
 pub mod lock;
+mod pump;
 mod traits;
 
 pub use advertisement::{discover_by_manufacturer_data, discover_by_service_uuid};
 #[cfg(feature = "btleplug")]
 pub use btleplug_impl::BtleplugTransport;
-pub use lock::{Detection, LockState, OpeningMode, SaltoLock};
+pub use lock::{HandshakePlan, LockState, OpeningMode, SaltoLock, StderrObserver};
+pub use pump::{run_session, SessionObserver};
 pub use traits::{
     BleTransport, ConnectedLock, DiscoveredLock, LockFilter, Notification, SALTO_NOTIFY_UUID,
     SALTO_SERVICE_UUID, SALTO_WRITE_UUID,
@@ -31,3 +33,4 @@ pub use traits::{
 /// The failure vocabulary is shared with the protocol core; the transport
 /// contributes the connection-level variants rather than an error type of its own.
 pub use mkey_core::{Error, ErrorCode, ProtocolFlags, Rf3State, SALTO_MANUFACTURER_ID};
+pub use mkey_session::{Detection, Options, Outcome, Phase, Session, Timeouts, Trace};

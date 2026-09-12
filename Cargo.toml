@@ -10,7 +10,8 @@ license = "MPL-2.0"
 
 [workspace.dependencies]
 mkey-core = { path = "crates/mkey-core" }
-mkey-ble = { path = "crates/mkey-ble" }
+mkey-ble = { path = "crates/mkey-ble", default-features = false }
+mkey-session = { path = "crates/mkey-session" }
 mkey-sdk-virgil = { path = "crates/mkey-sdk-virgil" }
 
 aes = "0.8"
@@ -29,7 +30,7 @@ rand = "0.8"
 rsa = "0.9"
 serde = { version = "1", features = ["derive"] }
 thiserror = "1"
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1" }
 uuid = "1.20.0"
 wasmtime = "29"
 
@@ -53,14 +54,17 @@ sdk-virgil = ["sdk", "dep:mkey-sdk-virgil"]
 
 [dependencies]
 mkey-core.workspace = true
-mkey-ble = { workspace = true, optional = true }
+mkey-session.workspace = true
+mkey-ble = { workspace = true, optional = true, features = ["btleplug"] }
 mkey-sdk-virgil = { workspace = true, optional = true }
 
 [dev-dependencies]
 base64.workspace = true
 dotenvy = "0.15"
 hex.workspace = true
-tokio.workspace = true
+# `test-util` gives the session tests a paused clock, so the 30 s first-packet
+# timeout fires instantly instead of being waited out.
+tokio = { workspace = true, features = ["full", "test-util"] }
 
 [[example]]
 name = "mkey_open"

@@ -10,6 +10,7 @@ use crate::crypto::crc16_hasher;
 use crate::data::base62::encode_base62;
 use crate::data::mobile_key::{MobileKey, Permissions};
 use crate::error::Error;
+use crate::op_result::{decode_op_result, OpResultGroup};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -89,6 +90,7 @@ pub struct JustinProtocolManager<S: MobileKeyStore> {
     current_key: Option<MobileKey>,
     secure_session: bool,
     last_audit_op_result: Option<u8>,
+    kn_read_refusals: u32,
 }
 
 impl<S: MobileKeyStore> JustinProtocolManager<S> {
@@ -99,6 +101,7 @@ impl<S: MobileKeyStore> JustinProtocolManager<S> {
             current_key: None,
             secure_session: false,
             last_audit_op_result: None,
+            kn_read_refusals: 0,
         }
     }
 
@@ -126,11 +129,21 @@ impl<S: MobileKeyStore> JustinProtocolManager<S> {
         self.last_audit_op_result
     }
 
+    /// How many times the lock has been refused the kN key so far.
+    ///
+    /// A lock asking for tag `0x02` outside a secure session is either running
+    /// an old firmware or is not the lock it claims to be; either way the
+    /// session carries on, and the count is what lets a caller notice.
+    pub fn refused_kn_reads(&self) -> u32 {
+        self.kn_read_refusals
+    }
+
     pub fn reset(&mut self) {
         self.state = JustinState::Ready;
         self.current_key = None;
         self.secure_session = false;
         self.last_audit_op_result = None;
+        self.kn_read_refusals = 0;
     }
 
     pub fn process_command(&mut self, data: &[u8]) -> Result<Vec<u8>, Error> {
@@ -206,6 +219,12 @@ impl<S: MobileKeyStore> JustinProtocolManager<S> {
             }
         };
 
+        if self.refuses_kn_key(tag_id) {
+            self.kn_read_refusals += 1;
+            eprintln!("[JUSTIN] Refused to hand out the kN key outside a secure session");
+            return Ok(vec![CommandStatus::GenericError.into()]);
+        }
+
         if !self.can_read_tag(tag_id, tag.permissions) {
             if !tag.permissions.contains(Permissions::READABLE) {
                 return Ok(vec![CommandStatus::NotFound.into()]);
@@ -271,7 +290,7 @@ impl<S: MobileKeyStore> JustinProtocolManager<S> {
                 "[LOCK RESULT] OpResult={} ({}) Group={}",
                 op_result,
                 decode_op_result(op_result),
-                decode_op_result_group(op_result)
+                OpResultGroup::of(op_result)
             );
             if data.len() > 1 {
                 eprintln!("[LOCK RESULT] Additional data: {:02X?}", &data[1..]);
@@ -281,7 +300,23 @@ impl<S: MobileKeyStore> JustinProtocolManager<S> {
         Ok(vec![CommandStatus::Success.into()])
     }
 
+    /// The pre-shared kN key is served inside a secure session only, where the
+    /// peer has already proven it knows that key.
+    ///
+    /// This deviates from the vendor SDK, which treats `0x02` as a legacy tag
+    /// readable by anyone that has managed to connect. Handing the key that
+    /// authenticates the session to an unauthenticated peer defeats the point
+    /// of having one. The browser port has always behaved this way; the
+    /// deviation is now shared rather than divergent.
+    fn refuses_kn_key(&self, tag_id: u8) -> bool {
+        tag_id == TAG_KN_KEY && !self.secure_session
+    }
+
     fn can_read_tag(&self, tag_id: u8, permissions: Permissions) -> bool {
+        if self.refuses_kn_key(tag_id) {
+            return false;
+        }
+
         if is_legacy_tag(tag_id) {
             return true;
         }
@@ -322,6 +357,9 @@ impl<S: MobileKeyStore> JustinProtocolManager<S> {
 /// Audit tag id. The lock writes the operation result here.
 pub const TAG_AUDIT: u8 = 0x0B;
 
+/// Tag id of the pre-shared kN key.
+pub const TAG_KN_KEY: u8 = 0x02;
+
 /// Derive the key-store lookup identifier for an 8-byte key id.
 ///
 /// `base62(keyId ‖ crc16Hasher(keyId))`, matching the OPEN command in the
@@ -341,35 +379,6 @@ pub fn compute_key_identifier(key_id: &[u8]) -> String {
 }
 
 /// Decode OpResult from the lock
-fn decode_op_result(op_result: u8) -> &'static str {
-    match op_result {
-        0 => "UNKNOWN_RESULT",
-        2 => "ACCESS_GRANTED",
-        3 => "ACCESS_REJECTED",
-        6 => "DOOR_IN_OFFICE",
-        7 => "PIN_REQUIRED",
-        10 => "END_OFFICE",
-        11 => "CANCELLED_KEY",
-        14 => "OPENING_ROLLER",
-        18 => "CLOSING_ROLLER",
-        22 => "STOP_ROLLER",
-        26 => "WAIT_SECOND_CARD",
-        27 => "FINGER_REQUIRED",
-        30 => "KEY_PROCESSED",
-        _ => "UNKNOWN",
-    }
-}
-
-fn decode_op_result_group(op_result: u8) -> &'static str {
-    match op_result & 3 {
-        0 => "UNKNOWN",
-        1 => "FAILURE",
-        2 => "ACCEPTED",
-        3 => "REJECTED",
-        _ => "INVALID",
-    }
-}
-
 fn is_legacy_tag(tag_id: u8) -> bool {
     // Matches Java SDK's `MobileKeyTransformer`: only tags 0x00..0x02 are treated as legacy.
     // These are returned without permission checks and are never writable.
@@ -388,6 +397,7 @@ impl JustinProtocolManager<NoopKeyStore> {
             current_key: Some(key),
             secure_session: false,
             last_audit_op_result: None,
+            kn_read_refusals: 0,
         }
     }
 }
@@ -425,6 +435,36 @@ mod tests {
     }
 
     #[test]
+    fn the_kn_key_is_refused_outside_a_secure_session() {
+        let mut justin = JustinProtocolManager::new_with_key(MobileKey::new([0x42u8; 16]));
+        justin.set_secure_session(false);
+
+        // READ_TAG 0x02 — the pre-shared kN key.
+        assert_eq!(
+            justin.process_command(&[0x02, TAG_KN_KEY]).unwrap(),
+            vec![CommandStatus::GenericError as u8]
+        );
+        assert_eq!(justin.refused_kn_reads(), 1);
+
+        justin.process_command(&[0x02, TAG_KN_KEY]).unwrap();
+        assert_eq!(justin.refused_kn_reads(), 2);
+    }
+
+    #[test]
+    fn the_kn_key_is_served_inside_a_secure_session() {
+        let key = MobileKey::new([0x42u8; 16]);
+        let expected = key.kn_key.to_vec();
+        let mut justin = JustinProtocolManager::new_with_key(key);
+        justin.set_secure_session(true);
+
+        let response = justin.process_command(&[0x02, TAG_KN_KEY]).unwrap();
+
+        assert_eq!(response[0], CommandStatus::Success as u8);
+        assert_eq!(&response[1..], &expected[..]);
+        assert_eq!(justin.refused_kn_reads(), 0);
+    }
+
+    #[test]
     fn only_tags_0x00_to_0x02_are_legacy() {
         for id in 0x00u8..=0x02 {
             assert!(is_legacy_tag(id));
@@ -440,11 +480,11 @@ mod tests {
         assert_eq!(decode_op_result(3), "ACCESS_REJECTED");
         assert_eq!(decode_op_result(6), "DOOR_IN_OFFICE");
         assert_eq!(decode_op_result(99), "UNKNOWN");
-        assert_eq!(decode_op_result_group(2), "ACCEPTED");
-        assert_eq!(decode_op_result_group(6), "ACCEPTED");
-        assert_eq!(decode_op_result_group(3), "REJECTED");
-        assert_eq!(decode_op_result_group(1), "FAILURE");
-        assert_eq!(decode_op_result_group(0), "UNKNOWN");
+        assert_eq!(OpResultGroup::of(2), OpResultGroup::Accepted);
+        assert_eq!(OpResultGroup::of(6), OpResultGroup::Accepted);
+        assert_eq!(OpResultGroup::of(3), OpResultGroup::Rejected);
+        assert_eq!(OpResultGroup::of(1), OpResultGroup::Failure);
+        assert_eq!(OpResultGroup::of(0), OpResultGroup::Unknown);
     }
 
     #[test]

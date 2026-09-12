@@ -10,7 +10,7 @@ pub use mkey_sdk_virgil::{
 #[cfg(feature = "ble")]
 use crate::MobileKey;
 #[cfg(feature = "ble")]
-use mkey_ble::{DiscoveredLock, Error, LockFilter, OpeningMode, SaltoLock};
+use mkey_ble::{DiscoveredLock, Error, LockFilter, OpeningMode, Outcome, SaltoLock};
 #[cfg(feature = "ble")]
 use std::time::Duration;
 
@@ -24,13 +24,16 @@ use std::time::Duration;
 /// * `lock_name` — optional lock name filter (connects to first matching lock)
 /// * `mode` — `OpeningMode::Standard` or `OpeningMode::Office`
 /// * `scan_timeout` — maximum time to scan for a lock (default: 30s)
+///
+/// A rejection by the lock is not an error: it comes back as an [`Outcome`]
+/// whose group is `rejected`.
 #[cfg(feature = "ble")]
 pub async fn open(
     mobile_key: MobileKey,
     lock_name: Option<&str>,
     mode: OpeningMode,
     scan_timeout: Option<Duration>,
-) -> Result<(), Error> {
+) -> Result<Outcome, Error> {
     let mut lock = SaltoLock::new().await?;
 
     let filter: Option<LockFilter> = lock_name.map(|name| {
@@ -41,9 +44,8 @@ pub async fn open(
     let timeout = scan_timeout.or(Some(Duration::from_secs(30)));
     lock.scan_and_connect_filtered(timeout, filter).await?;
     lock.authenticate(mobile_key).await?;
-    lock.open_with_mode(mode).await?;
 
-    Ok(())
+    lock.open_with_mode(mode).await
 }
 
 /// Decode a Virgil-encrypted mobile key.
@@ -81,13 +83,12 @@ pub async fn open_encoded(
     lock_name: Option<&str>,
     mode: OpeningMode,
     scan_timeout: Option<Duration>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<Outcome, Box<dyn std::error::Error>> {
     let mobile_key = decode(
         rsa_private_key_der,
         encrypted_virgil_key,
         encrypted_mkey_data,
     )?;
-    open(mobile_key, lock_name, mode, scan_timeout).await?;
 
-    Ok(())
+    Ok(open(mobile_key, lock_name, mode, scan_timeout).await?)
 }

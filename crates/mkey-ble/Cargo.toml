@@ -14,10 +14,14 @@ btleplug = ["dep:btleplug", "dep:futures"]
 
 [dependencies]
 mkey-core.workspace = true
-tokio.workspace = true
+mkey-session.workspace = true
+hex.workspace = true
+# Only the timer. Keeping the runtime out of the feature list is what lets the
+# crate — and so the simulator that depends on it — still build for wasm32.
+tokio = { workspace = true, features = ["time"] }
 uuid.workspace = true
 btleplug = { workspace = true, optional = true }
 futures = { workspace = true, optional = true }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["test-util"] }
+tokio = { workspace = true, features = ["macros", "rt", "test-util", "time"] }

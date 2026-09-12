@@ -1,0 +1,11 @@
+[package]
+name = "mkey-session"
+description = "One SALTO KS opening attempt as a pure state machine: events in, actions out. No I/O, no clock, no async."
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+mkey-core.workspace = true
+hex.workspace = true
