@@ -1,0 +1,20 @@
+[package]
+name = "mkey-wasm"
+description = "The SALTO KS session as a WebAssembly module: events in, actions out."
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+mkey-core.workspace = true
+mkey-session.workspace = true
+serde.workspace = true
+serde_bytes = "0.11"
+serde-wasm-bindgen = "0.6"
+# Pinned to the CLI this repository builds with: wasm-bindgen refuses a
+# mismatch between the crate and the binary that post-processes its output.
+wasm-bindgen = "0.2.120"

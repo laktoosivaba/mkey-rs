@@ -18,7 +18,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mkey_bytes = hex::decode(&mkey_tlv)?;
     let mobile_key = MobileKey::from_bytes(&mkey_bytes)?;
 
-    mkey::sdk::open(
+    let outcome = mkey::sdk::open(
         mobile_key,
         None,
         OpeningMode::Standard,
@@ -26,6 +26,20 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     )
     .await?;
 
-    println!("Session completed!");
+    println!(
+        "v0{}00: {} ({}), {}",
+        outcome.protocol_version,
+        outcome.op_result_name(),
+        outcome
+            .op_result
+            .map(|r| r.to_string())
+            .unwrap_or_else(|| "no result".to_string()),
+        outcome.group
+    );
+
+    if !outcome.accepted {
+        std::process::exit(1);
+    }
+
     Ok(())
 }

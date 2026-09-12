@@ -1,0 +1,23 @@
+[package]
+name = "mkey-core"
+description = "SALTO KS protocol: crypto primitives, mobile key codec, SSP and Justin. No I/O."
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+aes.workspace = true
+base62.workspace = true
+cbc.workspace = true
+getrandom.workspace = true
+hex.workspace = true
+iso7816-tlv.workspace = true
+once_cell.workspace = true
+thiserror.workspace = true
+
+# `getrandom` has no backend for wasm32-unknown-unknown unless it is told to
+# use the Web Crypto one. Its compile_error still says a rustflag is needed
+# too; as of 0.3.4 the feature alone is what the backend is gated on.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { workspace = true, features = ["wasm_js"] }

@@ -10,6 +10,68 @@ The Rust implementation is reverse engineered from [the original vendor sdk](htt
 - Decoding `mkey_data` into plain TLV using Virgil crypto WASM
 - Generating and verifying the keystore a device registration needs
 
+## Crate layout
+
+One workspace, split along the line between deciding bytes and moving them.
+`mkey` itself is a facade: everything it exports lives in one of the crates
+below.
+
+| crate | what it is | targets |
+|---|---|---|
+| `mkey-core` | the protocol: crypto, mobile key codec, SSP, Justin. No I/O, no async, no clock. | any, `wasm32-unknown-unknown` included |
+| `mkey-session` | one opening attempt as a pure state machine: events in, actions out | any, wasm32 included |
+| `mkey-ble` | the I/O shell: the `BleTransport` trait, its btleplug implementation (feature `btleplug`), and the pump that carries the session's actions out to a radio | native; without the radio, wasm32 too |
+| `mkey-wasm` | the session compiled for the browser: events in, actions out, as plain objects | `wasm32-unknown-unknown` |
+| `mkey-sdk-virgil` | provisioning: opening a Virgil container, generating the keystore | native |
+
+The split is what lets the protocol be compiled for the browser without a
+Bluetooth stack anywhere in the dependency tree. The check that keeps it
+honest:
+
+```bash
+cargo check -p mkey-core -p mkey-session -p mkey-ble \
+  --no-default-features --target wasm32-unknown-unknown
+```
+
+### Building the wasm module
+
+```bash
+crates/mkey-wasm/build.sh            # --target web, into crates/mkey-wasm/pkg
+crates/mkey-wasm/build.sh nodejs out # or anywhere else
+```
+
+cargo, `wasm-bindgen` and `wasm-opt` are spelled out in that script rather
+than left to `wasm-pack`, which applies its optimiser settings only to its own
+`release` profile. `wasm-bindgen` is pinned to the version of the CLI, because
+it refuses a mismatch. Nothing else is needed: `mkey-core` turns on
+`getrandom`'s `wasm_js` feature for wasm32 itself, so a plain `cargo build
+--target wasm32-unknown-unknown` works in a fresh clone.
+
+Measured on 2026-09-12, `wasm-release` profile plus `wasm-opt -Oz`:
+
+| | bytes |
+|---|---|
+| raw | 133 756 |
+| gzip | 58 495 |
+| brotli | 49 701 |
+| JS glue, gzip | 4 822 |
+
+Loading and instantiating it takes well under a millisecond on a desktop, and
+a whole opening attempt — handshake, exchange, verdict — runs in 35 µs once
+warm, so the size is the only number that matters.
+
+### Where the decisions live
+
+`mkey-session` is sans-I/O, in the sense `quinn` and `rustls` use the word:
+`Session::poll` takes an event and returns the actions its caller must carry
+out, and that is the entire interface. No futures cross it, no traits have to
+be implemented, and nothing in it can block.
+
+Three shells drive it — the native pump in `mkey-ble`, a synchronous one that
+needs no I/O at all, and the browser's. They are interchangeable by
+construction, and a lock simulator with a byte-level conformance suite, kept
+outside this repository as test tooling, holds them to the same packets.
+
 ## Registering a device (keystore)
 
 `mkey_decode` needs a *keystore*: an RSA key that protects a Virgil EC key,
@@ -72,8 +134,12 @@ tokio = { version = "1", features = ["full"] }
 
 | Feature | Description |
 |---------|-------------|
+| `ble` | The native Bluetooth shell: btleplug, tokio, `SaltoLock` (**on by default**) |
 | `sdk` | High-level `sdk::open()` entry point |
 | `sdk-virgil` | Virgil crypto decryption support (includes `sdk`) |
+
+Turn `ble` off (`default-features = false`) and what is left is the protocol
+alone — no Bluetooth stack, no async runtime.
 
 ## Quick Start
 
@@ -87,7 +153,7 @@ use std::time::Duration;
 async fn main() -> Result<(), mkey::Error> {
     let mobile_key = MobileKey::from_hex("c0020100c1...")?;
 
-    mkey::sdk::open(
+    let outcome = mkey::sdk::open(
         mobile_key,
         None,                             // optional lock name filter
         OpeningMode::Standard,            // or OpeningMode::Office
@@ -95,6 +161,7 @@ async fn main() -> Result<(), mkey::Error> {
     )
     .await?;
 
+    println!("{} ({})", outcome.op_result_name(), outcome.group);
     Ok(())
 }
 ```
@@ -112,12 +179,18 @@ async fn main() -> Result<(), mkey::Error> {
     let mut lock = SaltoLock::new().await?;
     lock.scan_and_connect(Some(Duration::from_secs(10))).await?;
     lock.authenticate(mobile_key).await?;
-    lock.open_with_mode(OpeningMode::Standard).await?;
-    lock.disconnect().await?;
+
+    // The link is disconnected on every path out of this call.
+    let outcome = lock.open_with_mode(OpeningMode::Standard).await?;
+    println!("{} ({})", outcome.op_result_name(), outcome.group);
 
     Ok(())
 }
 ```
+
+A rejection by the lock is not an error: `open_with_mode` succeeds and reports
+`outcome.group == OpResultGroup::Rejected`. Errors are for not getting an
+answer at all.
 
 ## Running the Examples
 
